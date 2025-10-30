@@ -22,67 +22,6 @@ import subprocess
 import platform
 
 
-class VideoInfoThread(QThread):
-    """Thread to fetch video information without downloading"""
-    info_ready = pyqtSignal(dict)
-    error = pyqtSignal(str)
-
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-
-    def run(self):
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.url, download=False)
-                self.info_ready.emit(info)
-        except Exception as e:
-            self.error.emit(str(e))
-
-
-class PlaylistInfoThread(QThread):
-    """Thread to fetch playlist information"""
-    info_ready = pyqtSignal(list)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int, int)
-
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-
-    def run(self):
-        try:
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': True,
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(self.url, download=False)
-                if 'entries' in info:
-                    videos = []
-                    total = len(list(info['entries']))
-                    for idx, entry in enumerate(info['entries'], 1):
-                        if entry:
-                            videos.append({
-                                'title': entry.get('title', 'Unknown'),
-                                'url': entry.get('url', ''),
-                                'id': entry.get('id', ''),
-                                'duration': entry.get('duration', 0)
-                            })
-                        self.progress.emit(idx, total)
-                    self.info_ready.emit(videos)
-                else:
-                    self.error.emit("Not a playlist")
-        except Exception as e:
-            self.error.emit(str(e))
-
-
 class DownloadThread(QThread):
     """Thread to handle video downloading without blocking UI"""
     progress = pyqtSignal(dict)
@@ -153,6 +92,67 @@ class DownloadThread(QThread):
             else:
                 self.finished.emit(False, f"Error: {str(e)}", "")
                 self.log_message.emit(f"Error occurred: {str(e)}")
+
+
+class VideoInfoThread(QThread):
+    """Thread to fetch video information without downloading"""
+    info_ready = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(self.url, download=False)
+                self.info_ready.emit(info)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class PlaylistInfoThread(QThread):
+    """Thread to fetch playlist information"""
+    info_ready = pyqtSignal(list)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, int)
+
+    def __init__(self, url):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(self.url, download=False)
+                if 'entries' in info:
+                    videos = []
+                    total = len(list(info['entries']))
+                    for idx, entry in enumerate(info['entries'], 1):
+                        if entry:
+                            videos.append({
+                                'title': entry.get('title', 'Unknown'),
+                                'url': entry.get('url', ''),
+                                'id': entry.get('id', ''),
+                                'duration': entry.get('duration', 0)
+                            })
+                        self.progress.emit(idx, total)
+                    self.info_ready.emit(videos)
+                else:
+                    self.error.emit("Not a playlist")
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class BatchDownloadThread(QThread):
@@ -419,10 +419,10 @@ class VideoDownloaderApp(QMainWindow):
 
         self.load_settings()
         self.apply_theme()
+        self.create_status_bar()
         self.init_ui()
         self.create_menu_bar()
         self.create_toolbar()
-        self.create_status_bar()
         self.setup_system_tray()
         self.load_history()
 
@@ -947,7 +947,7 @@ class VideoDownloaderApp(QMainWindow):
 
         quality_format_layout.addWidget(QLabel("Audio Quality:"), 1, 2)
         self.audio_quality_combo = QComboBox()
-        self.audio_quality_combo.addItems(["320 kbps", "256 kbps", "192 kbps", "128 kbps", "96 kbps"])
+        self.audio_quality_combo.addItems(["320 mbps", "256 mbps", "192 mbps", "128 mbps", "96 mbps"])
         self.audio_quality_combo.setCurrentIndex(2)
         quality_format_layout.addWidget(self.audio_quality_combo, 1, 3)
 
