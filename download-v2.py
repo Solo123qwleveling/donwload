@@ -2,9 +2,6 @@ import sys
 import os
 import json
 import threading
-import hashlib
-import requests
-from pathlib import Path
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
                              QComboBox, QCheckBox, QProgressBar, QTextEdit,
@@ -13,21 +10,60 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QScrollArea, QGridLayout, QSlider, QListWidgetItem,
                              QSystemTrayIcon, QMenu, QAction, QToolBar, QStatusBar,
                              QTableWidget, QTableWidgetItem, QHeaderView, QDialog,
-                             QDialogButtonBox, QRadioButton, QButtonGroup, QDoubleSpinBox,
-                             QCalendarWidget, QTimeEdit)
+                             QDialogButtonBox, QRadioButton, QButtonGroup)
 from PyQt5.QtCore import (QThread, pyqtSignal, Qt, QTimer, QSize, QSettings,
-                          QUrl, QPropertyAnimation, QEasingCurve, QRect, QDateTime)
+                          QUrl, QPropertyAnimation, QEasingCurve, QRect)
 from PyQt5.QtGui import (QFont, QIcon, QPixmap, QPalette, QColor, QDesktopServices,
                          QTextCursor, QLinearGradient, QPainter, QBrush)
 import yt_dlp
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 import subprocess
 import platform
 
+# ============================================================================
+# PART 1: LANGUAGE AND FORMAT DEFINITIONS
+# ============================================================================
+
+SUBTITLE_LANGUAGES = {
+    'en': 'English',
+    'es': 'Spanish',
+    'fr': 'French',
+    'de': 'German',
+    'it': 'Italian',
+    'pt': 'Portuguese',
+    'ru': 'Russian',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'zh': 'Chinese',
+    'ar': 'Arabic',
+    'hi': 'Hindi',
+    'pl': 'Polish',
+    'tr': 'Turkish',
+    'nl': 'Dutch',
+    'vi': 'Vietnamese',
+    'id': 'Indonesian',
+    'th': 'Thai',
+    'uk': 'Ukrainian',
+    'cs': 'Czech',
+    'el': 'Greek',
+    'hu': 'Hungarian',
+    'ro': 'Romanian',
+    'sv': 'Swedish',
+    'fi': 'Finnish',
+    'da': 'Danish',
+    'no': 'Norwegian',
+}
+
+SUBTITLE_FORMATS = ['Auto', 'srt', 'vtt', 'ass', 'json3']
+
+
+# ============================================================================
+# PART 2: DOWNLOAD THREAD
+# ============================================================================
 
 class DownloadThread(QThread):
-    """Enhanced thread to handle video downloading with resume capability"""
+    """Thread to handle video downloading without blocking UI"""
     progress = pyqtSignal(dict)
     finished = pyqtSignal(bool, str, str)
     log_message = pyqtSignal(str)
@@ -37,20 +73,12 @@ class DownloadThread(QThread):
         self.url = url
         self.options = options
         self._is_cancelled = False
-        self._is_paused = False
         self.downloaded_file = None
-        self.download_start_time = None
-        self.bytes_downloaded_at_pause = 0
 
     def progress_hook(self, d):
-        """Enhanced callback for download progress with more metrics"""
+        """Callback for download progress"""
         if self._is_cancelled:
             raise Exception("Download cancelled by user")
-
-        while self._is_paused:
-            self.msleep(100)
-            if self._is_cancelled:
-                raise Exception("Download cancelled by user")
 
         if d['status'] == 'downloading':
             try:
@@ -60,19 +88,12 @@ class DownloadThread(QThread):
                     percent = (downloaded / total) * 100
                     speed = d.get('speed', 0)
                     eta = d.get('eta', 0)
-
-                    # Calculate elapsed time
-                    if self.download_start_time is None:
-                        self.download_start_time = datetime.now()
-                    elapsed = (datetime.now() - self.download_start_time).total_seconds()
-
                     self.progress.emit({
                         'percent': percent,
                         'speed': speed,
                         'eta': eta,
                         'downloaded': downloaded,
                         'total': total,
-                        'elapsed': elapsed,
                         'status': 'downloading'
                     })
             except:
@@ -82,56 +103,43 @@ class DownloadThread(QThread):
             self.progress.emit({'status': 'processing', 'percent': 100})
             self.log_message.emit("Download complete, processing...")
 
-    def pause(self):
-        """Pause the download"""
-        self._is_paused = True
-        self.log_message.emit("Download paused")
-
-    def resume(self):
-        """Resume the download"""
-        self._is_paused = False
-        self.log_message.emit("Download resumed")
-
     def cancel(self):
         """Cancel the download"""
         self._is_cancelled = True
-        self.log_message.emit("Download cancelled")
 
     def run(self):
-        """Execute download in separate thread with enhanced error handling"""
+        """Execute download in separate thread"""
         try:
             self.options['progress_hooks'] = [self.progress_hook]
             self.log_message.emit(f"Starting download: {self.url}")
-            self.download_start_time = datetime.now()
 
             with yt_dlp.YoutubeDL(self.options) as ydl:
-                if self.options.get('auto_update', False):
-                    try:
-                        self.log_message.emit("Checking for yt-dlp updates...")
-                        ydl.update()
-                        self.log_message.emit("yt-dlp is up to date")
-                    except:
-                        self.log_message.emit("Auto-update skipped")
+                try:
+                    self.log_message.emit("Checking for yt-dlp updates...")
+                    ydl.update()
+                    self.log_message.emit("yt-dlp is up to date")
+                except:
+                    self.log_message.emit("Auto-update skipped")
 
                 info = ydl.extract_info(self.url, download=True)
                 title = info.get('title', 'Unknown')
-                filesize = info.get('filesize', 0) or info.get('filesize_approx', 0)
-
-                elapsed = (datetime.now() - self.download_start_time).total_seconds()
-                self.log_message.emit(f"Successfully downloaded: {title} in {elapsed:.1f}s")
+                self.log_message.emit(f"Successfully downloaded: {title}")
 
             self.finished.emit(True, "Download completed successfully!", self.downloaded_file or "")
         except Exception as e:
             if self._is_cancelled:
                 self.finished.emit(False, "Download cancelled by user", "")
             else:
-                error_msg = str(e)
-                self.finished.emit(False, f"Error: {error_msg}", "")
-                self.log_message.emit(f"Error occurred: {error_msg}")
+                self.finished.emit(False, f"Error: {str(e)}", "")
+                self.log_message.emit(f"Error occurred: {str(e)}")
 
+
+# ============================================================================
+# PART 3: VIDEO INFO THREAD
+# ============================================================================
 
 class VideoInfoThread(QThread):
-    """Thread to fetch detailed video information"""
+    """Thread to fetch video information without downloading"""
     info_ready = pyqtSignal(dict)
     error = pyqtSignal(str)
 
@@ -153,8 +161,12 @@ class VideoInfoThread(QThread):
             self.error.emit(str(e))
 
 
+# ============================================================================
+# PART 4: PLAYLIST INFO THREAD
+# ============================================================================
+
 class PlaylistInfoThread(QThread):
-    """Enhanced thread to fetch playlist information with metadata"""
+    """Thread to fetch playlist information"""
     info_ready = pyqtSignal(list)
     error = pyqtSignal(str)
     progress = pyqtSignal(int, int)
@@ -181,9 +193,7 @@ class PlaylistInfoThread(QThread):
                                 'title': entry.get('title', 'Unknown'),
                                 'url': entry.get('url', ''),
                                 'id': entry.get('id', ''),
-                                'duration': entry.get('duration', 0),
-                                'uploader': entry.get('uploader', 'Unknown'),
-                                'view_count': entry.get('view_count', 0)
+                                'duration': entry.get('duration', 0)
                             })
                         self.progress.emit(idx, total)
                     self.info_ready.emit(videos)
@@ -193,8 +203,12 @@ class PlaylistInfoThread(QThread):
             self.error.emit(str(e))
 
 
+# ============================================================================
+# PART 5: BATCH DOWNLOAD THREAD
+# ============================================================================
+
 class BatchDownloadThread(QThread):
-    """Enhanced thread for batch downloads with pause/resume"""
+    """Thread to handle batch downloads"""
     progress = pyqtSignal(int, int, str)
     item_finished = pyqtSignal(bool, str, str)
     all_finished = pyqtSignal(int, int)
@@ -204,13 +218,6 @@ class BatchDownloadThread(QThread):
         self.urls = urls
         self.options_template = options_template
         self._is_cancelled = False
-        self._is_paused = False
-
-    def pause(self):
-        self._is_paused = True
-
-    def resume(self):
-        self._is_paused = False
 
     def cancel(self):
         self._is_cancelled = True
@@ -220,11 +227,6 @@ class BatchDownloadThread(QThread):
         failed = 0
 
         for idx, url in enumerate(self.urls, 1):
-            while self._is_paused:
-                self.msleep(100)
-                if self._is_cancelled:
-                    break
-
             if self._is_cancelled:
                 break
 
@@ -244,75 +246,239 @@ class BatchDownloadThread(QThread):
         self.all_finished.emit(successful, failed)
 
 
-class ScheduleDownloadDialog(QDialog):
-    """Dialog for scheduling downloads"""
+# ============================================================================
+# PART 6: SUBTITLE MANAGER
+# ============================================================================
+
+class SubtitleManager:
+    """Manages subtitle-related operations"""
+
+    def __init__(self):
+        self.languages = SUBTITLE_LANGUAGES.copy()
+        self.formats = SUBTITLE_FORMATS.copy()
+
+    def get_all_languages(self):
+        """Return all available languages"""
+        return self.languages.copy()
+
+    def validate_languages(self, lang_list):
+        """Validate and return only valid language codes"""
+        valid = [l for l in lang_list if l in self.languages]
+        return valid if valid else ['en']
+
+    def build_subtitle_options(self, download_all=False, languages=None,
+                               auto_generated=True, format_type='auto'):
+        """Build subtitle options for yt-dlp"""
+        opts = {
+            'writesubtitles': True,
+            'skip_unavailable_fragments': False,
+        }
+
+        if download_all:
+            opts['allsubtitles'] = True
+        elif languages:
+            opts['subtitleslangs'] = self.validate_languages(languages)
+        else:
+            opts['subtitleslangs'] = ['en']
+
+        if auto_generated:
+            opts['writeautomaticsub'] = True
+
+        if format_type and format_type != 'auto':
+            opts['subtitlesformat'] = format_type
+
+        return opts
+
+
+# ============================================================================
+# PART 7: LANGUAGE SELECTION WIDGET
+# ============================================================================
+
+class LanguageListWidget(QListWidget):
+    """Custom widget for selecting subtitle languages"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Schedule Download")
+        self.setSelectionMode(QListWidget.MultiSelection)
+        self._populate_languages()
+
+    def _populate_languages(self):
+        """Populate list with languages"""
+        for code, name in sorted(SUBTITLE_LANGUAGES.items()):
+            item = QListWidgetItem(f"{name} ({code})")
+            item.setData(1001, code)
+            if code == 'en':
+                item.setSelected(True)
+            self.addItem(item)
+
+    def get_selected_languages(self):
+        """Get selected language codes"""
+        selected = []
+        for i in range(self.count()):
+            item = self.item(i)
+            if item.isSelected():
+                selected.append(item.data(1001))
+        return selected if selected else ['en']
+
+    def select_languages(self, codes):
+        """Select languages by code"""
+        for i in range(self.count()):
+            item = self.item(i)
+            item.setSelected(item.data(1001) in codes)
+
+
+# ============================================================================
+# PART 8: SUBTITLE DIALOG
+# ============================================================================
+
+class SubtitleDownloadDialog(QDialog):
+    """Dialog for subtitle download configuration"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Subtitle Download Options")
         self.setModal(True)
-        self.setMinimumWidth(400)
-        self.scheduled_time = None
-        self.init_ui()
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(500)
+        self._init_ui()
 
-    def init_ui(self):
+    def _init_ui(self):
+        """Initialize dialog UI"""
         layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
 
-        info = QLabel("Schedule this download for a specific time:")
-        info.setStyleSheet("color: #8b949e; margin-bottom: 10px;")
+        layout.addWidget(self._create_mode_section())
+        layout.addWidget(self._create_language_section())
+        layout.addWidget(self._create_autogen_section())
+        layout.addWidget(self._create_format_section())
+        layout.addWidget(self._create_embed_section())
+        layout.addStretch()
+        layout.addWidget(self._create_buttons())
+
+    def _create_mode_section(self):
+        """Create mode selection section"""
+        group = QGroupBox("📥 Download Mode")
+        layout = QVBoxLayout()
+
+        self.all_radio = QRadioButton("Download All Available Subtitles")
+        self.all_radio.setChecked(True)
+        self.all_radio.toggled.connect(self._on_mode_changed)
+        layout.addWidget(self.all_radio)
+
+        self.specific_radio = QRadioButton("Download Specific Languages")
+        self.specific_radio.toggled.connect(self._on_mode_changed)
+        layout.addWidget(self.specific_radio)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_language_section(self):
+        """Create language selection section"""
+        group = QGroupBox("🌐 Language Selection")
+        layout = QVBoxLayout()
+
+        info = QLabel("Select languages (active when specific mode is selected):")
+        info.setStyleSheet("color: #8b949e; font-size: 9pt;")
         layout.addWidget(info)
 
-        datetime_group = QGroupBox("Date & Time")
-        datetime_layout = QVBoxLayout()
+        self.lang_list = LanguageListWidget()
+        self.lang_list.setEnabled(False)
+        layout.addWidget(self.lang_list)
 
-        self.calendar = QCalendarWidget()
-        self.calendar.setMinimumDate(QDateTime.currentDateTime().date())
-        datetime_layout.addWidget(self.calendar)
+        group.setLayout(layout)
+        return group
 
-        time_layout = QHBoxLayout()
-        time_layout.addWidget(QLabel("Time:"))
-        self.time_edit = QTimeEdit()
-        self.time_edit.setDisplayFormat("HH:mm")
-        self.time_edit.setTime(QDateTime.currentDateTime().time())
-        time_layout.addWidget(self.time_edit)
-        time_layout.addStretch()
+    def _create_autogen_section(self):
+        """Create auto-generated subtitles section"""
+        group = QGroupBox("🤖 Auto-Generated Subtitles")
+        layout = QVBoxLayout()
 
-        datetime_layout.addLayout(time_layout)
-        datetime_group.setLayout(datetime_layout)
-        layout.addWidget(datetime_group)
+        self.autogen_check = QCheckBox("Include Auto-Generated Subtitles")
+        self.autogen_check.setChecked(True)
+        layout.addWidget(self.autogen_check)
 
+        info = QLabel("Available when platform provides them (YouTube, etc.)")
+        info.setStyleSheet("color: #8b949e; font-size: 9pt;")
+        layout.addWidget(info)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_format_section(self):
+        """Create format selection section"""
+        group = QGroupBox("📋 Subtitle Format")
+        layout = QHBoxLayout()
+
+        layout.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(SUBTITLE_FORMATS)
+        layout.addWidget(self.format_combo, 1)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_embed_section(self):
+        """Create embedding options section"""
+        group = QGroupBox("📌 Embedding Options")
+        layout = QVBoxLayout()
+
+        self.embed_check = QCheckBox("Embed Subtitles into Video (Requires FFmpeg)")
+        self.embed_check.setChecked(False)
+        layout.addWidget(self.embed_check)
+
+        info = QLabel("Embeds the first language subtitle into the video file")
+        info.setStyleSheet("color: #8b949e; font-size: 9pt;")
+        layout.addWidget(info)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_buttons(self):
+        """Create dialog buttons"""
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        return buttons
 
-    def get_scheduled_datetime(self):
-        """Get the scheduled datetime"""
-        date = self.calendar.selectedDate()
-        time = self.time_edit.time()
-        return QDateTime(date, time)
+    def _on_mode_changed(self):
+        """Handle mode change"""
+        self.lang_list.setEnabled(self.specific_radio.isChecked())
 
+    def get_options(self):
+        """Get selected options"""
+        return {
+            'download_all': self.all_radio.isChecked(),
+            'selected_languages': self.lang_list.get_selected_languages(),
+            'auto_generated': self.autogen_check.isChecked(),
+            'embed': self.embed_check.isChecked(),
+            'format': self.format_combo.currentText(),
+        }
+
+
+# ============================================================================
+# PART 9: SETTINGS DIALOG
+# ============================================================================
 
 class SettingsDialog(QDialog):
-    """Enhanced settings dialog"""
+    """Settings dialog for application preferences"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
-        self.setMinimumWidth(600)
+        self.setMinimumWidth(500)
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        # Theme selection
         theme_group = QGroupBox("Appearance")
         theme_layout = QVBoxLayout()
 
-        self.dark_theme_radio = QRadioButton("Dark Theme")
+        self.dark_theme_radio = QRadioButton("Dark Theme (Default)")
         self.dark_theme_radio.setChecked(True)
         theme_layout.addWidget(self.dark_theme_radio)
 
@@ -323,26 +489,6 @@ class SettingsDialog(QDialog):
         theme_group.setLayout(theme_layout)
         layout.addWidget(theme_group)
 
-        # Performance settings
-        perf_group = QGroupBox("Performance")
-        perf_layout = QGridLayout()
-
-        perf_layout.addWidget(QLabel("Max Concurrent Downloads:"), 0, 0)
-        self.max_concurrent_spin = QSpinBox()
-        self.max_concurrent_spin.setRange(1, 10)
-        self.max_concurrent_spin.setValue(3)
-        perf_layout.addWidget(self.max_concurrent_spin, 0, 1)
-
-        perf_layout.addWidget(QLabel("Memory Buffer (MB):"), 1, 0)
-        self.buffer_spin = QSpinBox()
-        self.buffer_spin.setRange(1, 1024)
-        self.buffer_spin.setValue(64)
-        perf_layout.addWidget(self.buffer_spin, 1, 1)
-
-        perf_group.setLayout(perf_layout)
-        layout.addWidget(perf_group)
-
-        # Notifications
         notif_group = QGroupBox("Notifications")
         notif_layout = QVBoxLayout()
 
@@ -357,13 +503,9 @@ class SettingsDialog(QDialog):
         self.sound_on_complete = QCheckBox("Play sound on completion")
         notif_layout.addWidget(self.sound_on_complete)
 
-        self.minimize_to_tray = QCheckBox("Minimize to system tray")
-        notif_layout.addWidget(self.minimize_to_tray)
-
         notif_group.setLayout(notif_layout)
         layout.addWidget(notif_group)
 
-        # Auto-update
         update_group = QGroupBox("Updates")
         update_layout = QVBoxLayout()
 
@@ -371,66 +513,9 @@ class SettingsDialog(QDialog):
         self.auto_update_ytdlp.setChecked(True)
         update_layout.addWidget(self.auto_update_ytdlp)
 
-        self.check_updates_startup = QCheckBox("Check for application updates on startup")
-        self.check_updates_startup.setChecked(True)
-        update_layout.addWidget(self.check_updates_startup)
-
         update_group.setLayout(update_layout)
         layout.addWidget(update_group)
 
-        # Network settings
-        network_group = QGroupBox("Network")
-        network_layout = QGridLayout()
-
-        network_layout.addWidget(QLabel("Connection Timeout (s):"), 0, 0)
-        self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(5, 300)
-        self.timeout_spin.setValue(30)
-        network_layout.addWidget(self.timeout_spin, 0, 1)
-
-        network_layout.addWidget(QLabel("Max Retries:"), 1, 0)
-        self.max_retries_spin = QSpinBox()
-        self.max_retries_spin.setRange(1, 50)
-        self.max_retries_spin.setValue(10)
-        network_layout.addWidget(self.max_retries_spin, 1, 1)
-
-        self.use_proxy_check = QCheckBox("Use Proxy")
-        network_layout.addWidget(self.use_proxy_check, 2, 0)
-
-        self.proxy_input = QLineEdit()
-        self.proxy_input.setPlaceholderText("http://proxy:port")
-        self.proxy_input.setEnabled(False)
-        network_layout.addWidget(self.proxy_input, 2, 1)
-        self.use_proxy_check.toggled.connect(self.proxy_input.setEnabled)
-
-        network_group.setLayout(network_layout)
-        layout.addWidget(network_group)
-
-        # Storage settings
-        storage_group = QGroupBox("Storage")
-        storage_layout = QVBoxLayout()
-
-        self.auto_cleanup_check = QCheckBox("Auto-cleanup incomplete downloads")
-        self.auto_cleanup_check.setChecked(True)
-        storage_layout.addWidget(self.auto_cleanup_check)
-
-        self.auto_organize_check = QCheckBox("Auto-organize downloads by date")
-        storage_layout.addWidget(self.auto_organize_check)
-
-        disk_space_layout = QHBoxLayout()
-        disk_space_layout.addWidget(QLabel("Minimum Free Space (GB):"))
-        self.min_space_spin = QDoubleSpinBox()
-        self.min_space_spin.setRange(0.1, 1000)
-        self.min_space_spin.setValue(1.0)
-        self.min_space_spin.setSingleStep(0.5)
-        disk_space_layout.addWidget(self.min_space_spin)
-        disk_space_layout.addStretch()
-        storage_layout.addLayout(disk_space_layout)
-
-        storage_group.setLayout(storage_layout)
-        layout.addWidget(storage_group)
-
-        # Buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
         )
@@ -439,85 +524,68 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
 
+# ============================================================================
+# PART 10: ABOUT DIALOG
+# ============================================================================
+
 class AboutDialog(QDialog):
-    """Enhanced about dialog"""
+    """About dialog"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("About Video Downloader Pro")
         self.setModal(True)
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(400)
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
 
         title = QLabel("🎬 Video Downloader Pro")
-        title.setFont(QFont("Segoe UI", 20, QFont.Bold))
+        title.setFont(QFont("Segoe UI", 18, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #58a6ff; margin: 20px;")
         layout.addWidget(title)
 
-        version = QLabel("Version 3.0 - Ultimate Edition")
+        version = QLabel("Version 2.0 - Advanced Edition with Subtitles")
         version.setAlignment(Qt.AlignCenter)
-        version.setStyleSheet("color: #8b949e; margin-bottom: 10px; font-size: 12pt;")
+        version.setStyleSheet("color: #8b949e; margin-bottom: 10px;")
         layout.addWidget(version)
 
         description = QLabel(
             "A powerful, feature-rich video downloader built with PyQt5 and yt-dlp.\n\n"
-            "✨ New Features in v3.0:\n"
-            "• Scheduled downloads with calendar picker\n"
-            "• Advanced format selection with codec info\n"
-            "• Bandwidth management and speed limits\n"
-            "• Resume capability for interrupted downloads\n"
-            "• Duplicate detection and smart naming\n"
-            "• Network proxy support\n"
-            "• Auto-organization by date\n"
-            "• Enhanced statistics and analytics\n"
-            "• Playlist metadata extraction\n"
-            "• Custom filename templates\n\n"
-            "⚡ Core Features:\n"
-            "• Multi-quality video downloads (8K-240p)\n"
-            "• Audio extraction (MP3/M4A/OPUS/FLAC)\n"
-            "• Playlist & batch downloads\n"
+            "Features:\n"
+            "• Multi-quality video downloads\n"
+            "• Audio extraction with quality control\n"
+            "• Playlist support with batch downloads\n"
+            "• Subtitle downloads in 25+ languages\n"
             "• Real-time progress tracking\n"
-            "• Download queue management\n"
-            "• Python code generator\n"
-            "• Download history & statistics\n\n"
-            "Powered by yt-dlp & FFmpeg"
+            "• Download history and statistics\n"
+            "• Python code generator\n\n"
+            "Powered by yt-dlp"
         )
         description.setWordWrap(True)
-        description.setAlignment(Qt.AlignLeft)
-        description.setStyleSheet("color: #c9d1d9; margin: 20px; font-size: 10pt;")
+        description.setAlignment(Qt.AlignCenter)
+        description.setStyleSheet("color: #c9d1d9; margin: 20px;")
         layout.addWidget(description)
-
-        links_layout = QHBoxLayout()
-
-        github_btn = QPushButton("🔗 yt-dlp GitHub")
-        github_btn.clicked.connect(lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/yt-dlp/yt-dlp")))
-        links_layout.addWidget(github_btn)
-
-        ffmpeg_btn = QPushButton("🔗 FFmpeg")
-        ffmpeg_btn.clicked.connect(lambda: QDesktopServices.openUrl(
-            QUrl("https://ffmpeg.org/")))
-        links_layout.addWidget(ffmpeg_btn)
-
-        layout.addLayout(links_layout)
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
 
+# ============================================================================
+# PART 11: BATCH DOWNLOAD DIALOG
+# ============================================================================
+
 class BatchDownloadDialog(QDialog):
-    """Enhanced batch download dialog"""
+    """Dialog for batch download management"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Batch Download Manager")
         self.setModal(True)
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(700, 500)
         self.urls = []
         self.init_ui()
 
@@ -541,22 +609,14 @@ class BatchDownloadDialog(QDialog):
         import_btn.clicked.connect(self.import_urls)
         import_layout.addWidget(import_btn)
 
-        paste_btn = QPushButton("📋 Paste from Clipboard")
-        paste_btn.clicked.connect(self.paste_from_clipboard)
-        import_layout.addWidget(paste_btn)
-
         clear_btn = QPushButton("🗑 Clear All")
         clear_btn.clicked.connect(self.url_text.clear)
         import_layout.addWidget(clear_btn)
-
-        dedupe_btn = QPushButton("🔍 Remove Duplicates")
-        dedupe_btn.clicked.connect(self.remove_duplicates)
-        import_layout.addWidget(dedupe_btn)
-
         import_layout.addStretch()
+
         layout.addLayout(import_layout)
 
-        self.stats_label = QLabel("URLs: 0 | Duplicates: 0")
+        self.stats_label = QLabel("URLs: 0")
         self.stats_label.setStyleSheet("color: #58a6ff;")
         layout.addWidget(self.stats_label)
 
@@ -568,24 +628,6 @@ class BatchDownloadDialog(QDialog):
         buttons.accepted.connect(self.validate_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-
-    def paste_from_clipboard(self):
-        """Paste URLs from clipboard"""
-        clipboard = QApplication.clipboard()
-        text = clipboard.text()
-        if text:
-            current = self.url_text.toPlainText()
-            if current:
-                self.url_text.setPlainText(current + "\n" + text)
-            else:
-                self.url_text.setPlainText(text)
-
-    def remove_duplicates(self):
-        """Remove duplicate URLs"""
-        text = self.url_text.toPlainText()
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        unique_lines = list(dict.fromkeys(lines))
-        self.url_text.setPlainText('\n'.join(unique_lines))
 
     def import_urls(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -603,9 +645,7 @@ class BatchDownloadDialog(QDialog):
     def update_stats(self):
         text = self.url_text.toPlainText()
         lines = [line.strip() for line in text.split('\n') if line.strip()]
-        unique = len(set(lines))
-        duplicates = len(lines) - unique
-        self.stats_label.setText(f"URLs: {len(lines)} | Unique: {unique} | Duplicates: {duplicates}")
+        self.stats_label.setText(f"URLs: {len(lines)}")
 
     def validate_and_accept(self):
         text = self.url_text.toPlainText()
@@ -621,82 +661,15 @@ class BatchDownloadDialog(QDialog):
         return self.urls
 
 
-class FormatSelectorDialog(QDialog):
-    """Advanced format selector with codec information"""
-
-    def __init__(self, formats, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Select Format")
-        self.setModal(True)
-        self.setMinimumSize(900, 500)
-        self.formats = formats
-        self.selected_format = None
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-
-        info = QLabel("Select the format you want to download:")
-        info.setStyleSheet("color: #8b949e; margin-bottom: 10px;")
-        layout.addWidget(info)
-
-        self.format_table = QTableWidget()
-        self.format_table.setColumnCount(7)
-        self.format_table.setHorizontalHeaderLabels([
-            "Quality", "Extension", "Video Codec", "Audio Codec",
-            "FPS", "Size", "Format ID"
-        ])
-        self.format_table.horizontalHeader().setStretchLastSection(True)
-        self.format_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.format_table.setSelectionMode(QTableWidget.SingleSelection)
-
-        for fmt in self.formats:
-            row = self.format_table.rowCount()
-            self.format_table.insertRow(row)
-
-            quality = f"{fmt.get('height', '?')}p" if fmt.get('height') else "Audio only"
-            self.format_table.setItem(row, 0, QTableWidgetItem(quality))
-            self.format_table.setItem(row, 1, QTableWidgetItem(fmt.get('ext', 'N/A')))
-            self.format_table.setItem(row, 2, QTableWidgetItem(fmt.get('vcodec', 'N/A')))
-            self.format_table.setItem(row, 3, QTableWidgetItem(fmt.get('acodec', 'N/A')))
-            self.format_table.setItem(row, 4, QTableWidgetItem(str(fmt.get('fps', 'N/A'))))
-
-            filesize = fmt.get('filesize', 0) or fmt.get('filesize_approx', 0)
-            size_str = self.format_bytes(filesize) if filesize else "Unknown"
-            self.format_table.setItem(row, 5, QTableWidgetItem(size_str))
-            self.format_table.setItem(row, 6, QTableWidgetItem(str(fmt.get('format_id', 'N/A'))))
-
-        layout.addWidget(self.format_table)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def format_bytes(self, bytes_val):
-        if not bytes_val:
-            return "0 B"
-        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if bytes_val < 1024.0:
-                return f"{bytes_val:.2f} {unit}"
-            bytes_val /= 1024.0
-        return f"{bytes_val:.2f} PB"
-
-    def get_selected_format(self):
-        selected = self.format_table.selectedItems()
-        if selected:
-            row = selected[0].row()
-            return self.formats[row]
-        return None
-
+# ============================================================================
+# PART 12: MAIN APPLICATION
+# ============================================================================
 
 class VideoDownloaderApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Video Downloader Pro v3.0 - Ultimate Edition")
-        self.setGeometry(100, 100, 1300, 900)
+        self.setWindowTitle("Video Downloader Pro - Advanced Edition")
+        self.setGeometry(100, 100, 1200, 850)
 
         self.download_thread = None
         self.batch_thread = None
@@ -706,17 +679,11 @@ class VideoDownloaderApp(QMainWindow):
         self.current_video_info = None
         self.settings_file = os.path.join(os.path.expanduser("~"), ".video_downloader_settings.json")
         self.download_queue = []
-        self.scheduled_downloads = []
-        self.download_statistics = {
-            'total_downloads': 0,
-            'total_bytes': 0,
-            'total_time': 0,
-            'successful_downloads': 0,
-            'failed_downloads': 0
-        }
+        self.subtitle_config = None
+
+        self.subtitle_manager = SubtitleManager()
 
         self.load_settings()
-        self.load_statistics()
         self.apply_theme()
         self.create_status_bar()
         self.init_ui()
@@ -725,49 +692,10 @@ class VideoDownloaderApp(QMainWindow):
         self.setup_system_tray()
         self.load_history()
 
-        # Setup timers
-        self.schedule_timer = QTimer(self)
-        self.schedule_timer.timeout.connect(self.check_scheduled_downloads)
-        self.schedule_timer.start(60000)  # Check every minute
-
         QTimer.singleShot(1000, self.check_ytdlp_version)
 
-    def load_statistics(self):
-        """Load download statistics"""
-        stats_file = os.path.join(os.path.expanduser("~"), ".video_downloader_stats.json")
-        try:
-            if os.path.exists(stats_file):
-                with open(stats_file, 'r') as f:
-                    self.download_statistics = json.load(f)
-        except:
-            pass
-
-    def save_statistics(self):
-        """Save download statistics"""
-        stats_file = os.path.join(os.path.expanduser("~"), ".video_downloader_stats.json")
-        try:
-            with open(stats_file, 'w') as f:
-                json.dump(self.download_statistics, f, indent=2)
-        except Exception as e:
-            self.log_message(f"Failed to save statistics: {str(e)}")
-
-    def check_scheduled_downloads(self):
-        """Check if any scheduled downloads should start"""
-        current_time = QDateTime.currentDateTime()
-        downloads_to_start = []
-
-        for scheduled in self.scheduled_downloads[:]:
-            if scheduled['datetime'] <= current_time:
-                downloads_to_start.append(scheduled)
-                self.scheduled_downloads.remove(scheduled)
-
-        for download in downloads_to_start:
-            self.log_message(f"Starting scheduled download: {download['url']}")
-            self.url_input.setText(download['url'])
-            self.start_download()
-
     def apply_theme(self):
-        """Apply modern dark theme with improved styling"""
+        """Apply dark theme styling"""
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #0d1117;
@@ -776,7 +704,7 @@ class VideoDownloaderApp(QMainWindow):
                 color: #c9d1d9;
                 font-size: 11pt;
             }
-            QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit {
+            QLineEdit, QComboBox, QSpinBox {
                 background-color: #161b22;
                 color: #c9d1d9;
                 border: 2px solid #30363d;
@@ -785,7 +713,7 @@ class VideoDownloaderApp(QMainWindow):
                 font-size: 10pt;
                 selection-background-color: #58a6ff;
             }
-            QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+            QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
                 border: 2px solid #58a6ff;
             }
             QPushButton {
@@ -812,12 +740,6 @@ class VideoDownloaderApp(QMainWindow):
             }
             QPushButton#cancelBtn:hover {
                 background-color: #f85149;
-            }
-            QPushButton#pauseBtn {
-                background-color: #d29922;
-            }
-            QPushButton#pauseBtn:hover {
-                background-color: #e3b341;
             }
             QPushButton#secondaryBtn {
                 background-color: #21262d;
@@ -975,21 +897,12 @@ class VideoDownloaderApp(QMainWindow):
                 background-color: #58a6ff;
                 border: 2px solid #58a6ff;
             }
-            QCalendarWidget QWidget {
-                background-color: #161b22;
-                color: #c9d1d9;
-            }
-            QCalendarWidget QTableView {
-                background-color: #161b22;
-                selection-background-color: #58a6ff;
-            }
         """)
 
     def create_menu_bar(self):
         """Create application menu bar"""
         menubar = self.menuBar()
 
-        # File menu
         file_menu = menubar.addMenu("&File")
 
         new_download_action = QAction("📥 New Download", self)
@@ -1002,11 +915,6 @@ class VideoDownloaderApp(QMainWindow):
         batch_download_action.triggered.connect(self.show_batch_download_dialog)
         file_menu.addAction(batch_download_action)
 
-        schedule_action = QAction("⏰ Schedule Download", self)
-        schedule_action.setShortcut("Ctrl+T")
-        schedule_action.triggered.connect(self.schedule_download)
-        file_menu.addAction(schedule_action)
-
         file_menu.addSeparator()
 
         open_folder_action = QAction("📁 Open Download Folder", self)
@@ -1016,19 +924,11 @@ class VideoDownloaderApp(QMainWindow):
 
         file_menu.addSeparator()
 
-        export_menu = file_menu.addMenu("💾 Export")
-        export_menu.addAction("Export History", self.export_history)
-        export_menu.addAction("Export Statistics", self.export_statistics)
-        export_menu.addAction("Export Queue", self.export_queue)
-
-        file_menu.addSeparator()
-
         exit_action = QAction("❌ Exit", self)
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # Edit menu
         edit_menu = menubar.addMenu("&Edit")
 
         settings_action = QAction("⚙️ Settings", self)
@@ -1036,14 +936,6 @@ class VideoDownloaderApp(QMainWindow):
         settings_action.triggered.connect(self.show_settings_dialog)
         edit_menu.addAction(settings_action)
 
-        edit_menu.addSeparator()
-
-        clear_menu = edit_menu.addMenu("🗑 Clear")
-        clear_menu.addAction("Clear History", self.clear_history)
-        clear_menu.addAction("Clear Queue", self.clear_queue)
-        clear_menu.addAction("Clear Log", self.clear_log)
-
-        # View menu
         view_menu = menubar.addMenu("&View")
 
         history_action = QAction("📜 History", self)
@@ -1051,17 +943,11 @@ class VideoDownloaderApp(QMainWindow):
         history_action.triggered.connect(lambda: self.tabs.setCurrentIndex(2))
         view_menu.addAction(history_action)
 
-        stats_action = QAction("📊 Statistics", self)
-        stats_action.setShortcut("Ctrl+S")
-        stats_action.triggered.connect(lambda: self.tabs.setCurrentIndex(6))
-        view_menu.addAction(stats_action)
-
         log_action = QAction("📋 Log", self)
         log_action.setShortcut("Ctrl+L")
         log_action.triggered.connect(lambda: self.tabs.setCurrentIndex(3))
         view_menu.addAction(log_action)
 
-        # Tools menu
         tools_menu = menubar.addMenu("&Tools")
 
         update_ytdlp_action = QAction("🔄 Update yt-dlp", self)
@@ -1072,39 +958,11 @@ class VideoDownloaderApp(QMainWindow):
         check_ffmpeg_action.triggered.connect(self.check_ffmpeg)
         tools_menu.addAction(check_ffmpeg_action)
 
-        tools_menu.addSeparator()
-
-        format_selector_action = QAction("🎞️ Advanced Format Selector", self)
-        format_selector_action.triggered.connect(self.show_format_selector)
-        tools_menu.addAction(format_selector_action)
-
-        tools_menu.addSeparator()
-
-        duplicate_finder_action = QAction("🔍 Find Duplicate Files", self)
-        duplicate_finder_action.triggered.connect(self.find_duplicates)
-        tools_menu.addAction(duplicate_finder_action)
-
-        disk_space_action = QAction("💾 Check Disk Space", self)
-        disk_space_action.triggered.connect(self.check_disk_space)
-        tools_menu.addAction(disk_space_action)
-
-        # Help menu
         help_menu = menubar.addMenu("&Help")
 
         about_action = QAction("ℹ️ About", self)
         about_action.triggered.connect(self.show_about_dialog)
         help_menu.addAction(about_action)
-
-        docs_action = QAction("📖 yt-dlp Documentation", self)
-        docs_action.triggered.connect(lambda: QDesktopServices.openUrl(
-            QUrl("https://github.com/yt-dlp/yt-dlp#readme")))
-        help_menu.addAction(docs_action)
-
-        help_menu.addSeparator()
-
-        keyboard_shortcuts_action = QAction("⌨️ Keyboard Shortcuts", self)
-        keyboard_shortcuts_action.triggered.connect(self.show_shortcuts)
-        help_menu.addAction(keyboard_shortcuts_action)
 
     def create_toolbar(self):
         """Create application toolbar"""
@@ -1125,7 +983,7 @@ class VideoDownloaderApp(QMainWindow):
 
         toolbar.addSeparator()
 
-        folder_action = QAction("📁 Folder", self)
+        folder_action = QAction("📁 Open Folder", self)
         folder_action.triggered.connect(self.open_download_folder)
         toolbar.addAction(folder_action)
 
@@ -1135,14 +993,8 @@ class VideoDownloaderApp(QMainWindow):
         batch_action.triggered.connect(self.show_batch_download_dialog)
         toolbar.addAction(batch_action)
 
-        toolbar.addSeparator()
-
-        schedule_action = QAction("⏰ Schedule", self)
-        schedule_action.triggered.connect(self.schedule_download)
-        toolbar.addAction(schedule_action)
-
     def create_status_bar(self):
-        """Create enhanced status bar"""
+        """Create status bar"""
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
 
@@ -1154,27 +1006,15 @@ class VideoDownloaderApp(QMainWindow):
         self.downloads_count_status = QLabel("Downloads: 0")
         self.statusBar.addPermanentWidget(self.downloads_count_status)
 
-        self.statusBar.addPermanentWidget(QLabel("|"))
-
-        self.network_status = QLabel("🌐 Online")
-        self.statusBar.addPermanentWidget(self.network_status)
-
     def setup_system_tray(self):
         """Setup system tray icon"""
         try:
             self.tray_icon = QSystemTrayIcon(self)
-            self.tray_icon.setToolTip("Video Downloader Pro v3.0")
+            self.tray_icon.setToolTip("Video Downloader Pro")
 
             tray_menu = QMenu()
             show_action = tray_menu.addAction("Show Window")
             show_action.triggered.connect(self.show)
-
-            tray_menu.addSeparator()
-
-            new_download_action = tray_menu.addAction("New Download")
-            new_download_action.triggered.connect(lambda: (self.show(), self.tabs.setCurrentIndex(0)))
-
-            tray_menu.addSeparator()
 
             quit_action = tray_menu.addAction("Quit")
             quit_action.triggered.connect(self.close)
@@ -1191,16 +1031,15 @@ class VideoDownloaderApp(QMainWindow):
             self.activateWindow()
 
     def init_ui(self):
-        """Initialize the enhanced user interface"""
+        """Initialize user interface"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # Modern Title with Statistics
         title_layout = QHBoxLayout()
-        title = QLabel("🎬 Video Downloader Pro v3.0")
+        title = QLabel("🎬 Video Downloader Pro")
         title.setFont(QFont("Segoe UI", 20, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("color: #58a6ff; margin-bottom: 10px;")
@@ -1213,35 +1052,33 @@ class VideoDownloaderApp(QMainWindow):
 
         main_layout.addLayout(title_layout)
 
-        # Tab Widget
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         main_layout.addWidget(self.tabs)
 
         self.create_download_tab()
         self.create_playlist_tab()
+        self.create_subtitle_tab()
         self.create_history_tab()
         self.create_log_tab()
         self.create_code_tab()
         self.create_queue_tab()
-        self.create_statistics_tab()
 
         self.update_code()
-        self.log_message("Application initialized successfully - v3.0 Ultimate Edition")
+        self.log_message("Application initialized successfully")
 
     def create_download_tab(self):
-        """Create the enhanced main download tab"""
+        """Create main download tab"""
         download_tab = QWidget()
         download_layout = QVBoxLayout(download_tab)
         download_layout.setSpacing(15)
 
-        # URL Input Group
         url_group = QGroupBox("📎 Video URL & Preview")
         url_main_layout = QVBoxLayout()
 
         url_input_layout = QHBoxLayout()
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("Paste YouTube, Vimeo, TikTok, Twitter, or any supported video URL...")
+        self.url_input.setPlaceholderText("Paste YouTube, Vimeo, or any supported video URL here...")
         self.url_input.textChanged.connect(self.on_url_changed)
         self.url_input.returnPressed.connect(self.fetch_video_info)
         url_input_layout.addWidget(self.url_input)
@@ -1255,14 +1092,13 @@ class VideoDownloaderApp(QMainWindow):
         self.download_btn.clicked.connect(self.start_download)
         url_input_layout.addWidget(self.download_btn)
 
-        self.add_to_queue_btn = QPushButton("➕ Queue")
+        self.add_to_queue_btn = QPushButton("➕ Add to Queue")
         self.add_to_queue_btn.setObjectName("secondaryBtn")
         self.add_to_queue_btn.clicked.connect(self.add_to_queue)
         url_input_layout.addWidget(self.add_to_queue_btn)
 
         url_main_layout.addLayout(url_input_layout)
 
-        # Video Info Display
         self.info_frame = QFrame()
         self.info_frame.setStyleSheet("""
             QFrame {
@@ -1278,7 +1114,7 @@ class VideoDownloaderApp(QMainWindow):
         self.video_title_label = QLabel("Title: -")
         self.video_title_label.setWordWrap(True)
         self.video_title_label.setStyleSheet("color: #58a6ff; font-weight: bold;")
-        info_layout.addWidget(self.video_title_label, 0, 0, 1, 3)
+        info_layout.addWidget(self.video_title_label, 0, 0, 1, 2)
 
         self.video_duration_label = QLabel("Duration: -")
         info_layout.addWidget(self.video_duration_label, 1, 0)
@@ -1286,27 +1122,20 @@ class VideoDownloaderApp(QMainWindow):
         self.video_uploader_label = QLabel("Uploader: -")
         info_layout.addWidget(self.video_uploader_label, 1, 1)
 
-        self.video_upload_date_label = QLabel("Upload Date: -")
-        info_layout.addWidget(self.video_upload_date_label, 1, 2)
-
         self.video_views_label = QLabel("Views: -")
         info_layout.addWidget(self.video_views_label, 2, 0)
 
-        self.video_likes_label = QLabel("Likes: -")
-        info_layout.addWidget(self.video_likes_label, 2, 1)
-
         self.video_size_label = QLabel("Est. Size: -")
-        info_layout.addWidget(self.video_size_label, 2, 2)
+        info_layout.addWidget(self.video_size_label, 2, 1)
 
         url_main_layout.addWidget(self.info_frame)
+
         url_group.setLayout(url_main_layout)
         download_layout.addWidget(url_group)
 
-        # Settings Group
         settings_group = QGroupBox("⚙️ Download Settings")
         settings_layout = QVBoxLayout()
 
-        # Output Path
         path_layout = QHBoxLayout()
         path_layout.addWidget(QLabel("Save to:"))
         self.path_input = QLineEdit()
@@ -1320,17 +1149,6 @@ class VideoDownloaderApp(QMainWindow):
         path_layout.addWidget(browse_btn)
         settings_layout.addLayout(path_layout)
 
-        # Filename template
-        filename_layout = QHBoxLayout()
-        filename_layout.addWidget(QLabel("Filename:"))
-        self.filename_template = QLineEdit()
-        self.filename_template.setPlaceholderText("%(title)s.%(ext)s")
-        self.filename_template.setText(self.settings.get('filename_template', '%(title)s.%(ext)s'))
-        self.filename_template.setToolTip("Available: %(title)s, %(id)s, %(ext)s, %(uploader)s, %(upload_date)s")
-        filename_layout.addWidget(self.filename_template)
-        settings_layout.addLayout(filename_layout)
-
-        # Quality and Format
         quality_format_layout = QGridLayout()
 
         quality_format_layout.addWidget(QLabel("Quality:"), 0, 0)
@@ -1352,26 +1170,25 @@ class VideoDownloaderApp(QMainWindow):
 
         quality_format_layout.addWidget(QLabel("Format:"), 0, 2)
         self.format_combo = QComboBox()
-        self.format_combo.addItems(["mp4", "mkv", "webm", "avi", "mov", "flv"])
+        self.format_combo.addItems(["mp4", "mkv", "webm", "avi", "mov"])
         self.format_combo.setCurrentText(self.settings.get('format', "mp4"))
         self.format_combo.currentTextChanged.connect(self.update_code)
         quality_format_layout.addWidget(self.format_combo, 0, 3)
 
         quality_format_layout.addWidget(QLabel("Audio Format:"), 1, 0)
         self.audio_format_combo = QComboBox()
-        self.audio_format_combo.addItems(["mp3", "m4a", "opus", "vorbis", "wav", "flac", "aac"])
+        self.audio_format_combo.addItems(["mp3", "m4a", "opus", "vorbis", "wav", "flac"])
         self.audio_format_combo.setCurrentText(self.settings.get('audio_format', "mp3"))
         quality_format_layout.addWidget(self.audio_format_combo, 1, 1)
 
         quality_format_layout.addWidget(QLabel("Audio Quality:"), 1, 2)
         self.audio_quality_combo = QComboBox()
-        self.audio_quality_combo.addItems(["320 kbps", "256 kbps", "192 kbps", "128 kbps", "96 kbps", "64 kbps"])
+        self.audio_quality_combo.addItems(["320 mbps", "256 mbps", "192 mbps", "128 mbps", "96 mbps"])
         self.audio_quality_combo.setCurrentIndex(2)
         quality_format_layout.addWidget(self.audio_quality_combo, 1, 3)
 
         settings_layout.addLayout(quality_format_layout)
 
-        # Checkboxes
         checkbox_grid = QGridLayout()
 
         self.audio_only_check = QCheckBox("🎵 Audio Only")
@@ -1384,83 +1201,62 @@ class VideoDownloaderApp(QMainWindow):
         checkbox_grid.addWidget(self.embed_thumbnail_check, 0, 1)
 
         self.embed_subs_check = QCheckBox("📝 Embed Subtitles")
-        self.embed_subs_check.setChecked(self.settings.get('embed_subs', False))
         checkbox_grid.addWidget(self.embed_subs_check, 0, 2)
 
-        self.download_subs_check = QCheckBox("💬 All Subtitles")
+        self.download_subs_check = QCheckBox("💬 Download Subtitles")
         checkbox_grid.addWidget(self.download_subs_check, 1, 0)
 
-        self.write_description_check = QCheckBox("📄 Description")
-        checkbox_grid.addWidget(self.write_description_check, 1, 1)
+        self.advanced_subs_btn = QPushButton("⚙️ Subtitle Options")
+        self.advanced_subs_btn.setObjectName("secondaryBtn")
+        self.advanced_subs_btn.clicked.connect(self.show_subtitle_dialog)
+        checkbox_grid.addWidget(self.advanced_subs_btn, 1, 1)
 
-        self.write_thumbnail_check = QCheckBox("🎨 Thumbnail")
-        checkbox_grid.addWidget(self.write_thumbnail_check, 1, 2)
+        self.write_description_check = QCheckBox("📄 Save Description")
+        checkbox_grid.addWidget(self.write_description_check, 1, 2)
 
-        self.write_metadata_check = QCheckBox("📋 Metadata")
-        self.write_metadata_check.setToolTip("Save video metadata to JSON file")
-        checkbox_grid.addWidget(self.write_metadata_check, 2, 0)
-
-        self.write_comments_check = QCheckBox("💭 Comments")
-        self.write_comments_check.setToolTip("Save video comments")
-        checkbox_grid.addWidget(self.write_comments_check, 2, 1)
-
-        self.sponsorblock_check = QCheckBox("⏭️ SponsorBlock")
-        self.sponsorblock_check.setToolTip("Skip sponsor segments")
-        checkbox_grid.addWidget(self.sponsorblock_check, 2, 2)
+        self.write_thumbnail_check = QCheckBox("🎨 Save Thumbnail")
+        checkbox_grid.addWidget(self.write_thumbnail_check, 2, 0)
 
         settings_layout.addLayout(checkbox_grid)
         settings_group.setLayout(settings_layout)
         download_layout.addWidget(settings_group)
 
-        # Advanced Settings
         advanced_group = QGroupBox("🔧 Advanced Options")
         advanced_layout = QGridLayout()
 
         advanced_layout.addWidget(QLabel("Retries:"), 0, 0)
         self.retries_spin = QSpinBox()
-        self.retries_spin.setRange(0, 50)
-        self.retries_spin.setValue(self.settings.get('retries', 10))
+        self.retries_spin.setRange(0, 20)
+        self.retries_spin.setValue(self.settings.get('retries', 5))
         advanced_layout.addWidget(self.retries_spin, 0, 1)
 
         advanced_layout.addWidget(QLabel("Concurrent:"), 0, 2)
         self.concurrent_spin = QSpinBox()
-        self.concurrent_spin.setRange(1, 16)
+        self.concurrent_spin.setRange(1, 10)
         self.concurrent_spin.setValue(self.settings.get('concurrent', 4))
-        self.concurrent_spin.setToolTip("Number of concurrent fragments")
+        self.concurrent_spin.setToolTip("Number of concurrent fragments to download")
         advanced_layout.addWidget(self.concurrent_spin, 0, 3)
-
-        advanced_layout.addWidget(QLabel("Timeout (s):"), 1, 0)
-        self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(5, 300)
-        self.timeout_spin.setValue(30)
-        advanced_layout.addWidget(self.timeout_spin, 1, 1)
 
         self.ignore_errors_check = QCheckBox("⚠️ Ignore Errors")
         self.ignore_errors_check.setChecked(self.settings.get('ignore_errors', True))
-        advanced_layout.addWidget(self.ignore_errors_check, 1, 2, 1, 2)
+        advanced_layout.addWidget(self.ignore_errors_check, 1, 0)
 
         self.no_playlist_check = QCheckBox("🚫 No Playlist")
-        self.no_playlist_check.setToolTip("Download only single video")
-        advanced_layout.addWidget(self.no_playlist_check, 2, 0)
-
-        self.geo_bypass_check = QCheckBox("🌍 Geo-Bypass")
-        self.geo_bypass_check.setToolTip("Bypass geographic restrictions")
-        self.geo_bypass_check.setChecked(True)
-        advanced_layout.addWidget(self.geo_bypass_check, 2, 1)
+        self.no_playlist_check.setToolTip("Download only single video, ignore playlist")
+        advanced_layout.addWidget(self.no_playlist_check, 1, 1)
 
         self.limit_rate_check = QCheckBox("📊 Limit Rate")
         self.limit_rate_check.toggled.connect(self.toggle_rate_limit)
-        advanced_layout.addWidget(self.limit_rate_check, 2, 2)
+        advanced_layout.addWidget(self.limit_rate_check, 1, 2)
 
         self.rate_limit_input = QLineEdit()
         self.rate_limit_input.setPlaceholderText("e.g., 1M, 500K")
         self.rate_limit_input.setEnabled(False)
-        advanced_layout.addWidget(self.rate_limit_input, 2, 3)
+        advanced_layout.addWidget(self.rate_limit_input, 1, 3)
 
         advanced_group.setLayout(advanced_layout)
         download_layout.addWidget(advanced_group)
 
-        # Progress Group
         progress_group = QGroupBox("📊 Download Progress")
         progress_layout = QVBoxLayout()
 
@@ -1474,12 +1270,6 @@ class VideoDownloaderApp(QMainWindow):
         self.status_label.setStyleSheet("color: #7ee787; font-weight: bold;")
         stats_layout.addWidget(self.status_label, 1)
 
-        self.pause_btn = QPushButton("⏸️ Pause")
-        self.pause_btn.setObjectName("pauseBtn")
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.clicked.connect(self.pause_download)
-        stats_layout.addWidget(self.pause_btn)
-
         self.cancel_btn = QPushButton("❌ Cancel")
         self.cancel_btn.setObjectName("cancelBtn")
         self.cancel_btn.setEnabled(False)
@@ -1488,21 +1278,9 @@ class VideoDownloaderApp(QMainWindow):
 
         progress_layout.addLayout(stats_layout)
 
-        # Enhanced download stats
-        stats_grid = QHBoxLayout()
         self.speed_label = QLabel("Speed: -")
         self.speed_label.setStyleSheet("color: #8b949e;")
-        stats_grid.addWidget(self.speed_label)
-
-        self.eta_label = QLabel("ETA: -")
-        self.eta_label.setStyleSheet("color: #8b949e;")
-        stats_grid.addWidget(self.eta_label)
-
-        self.size_label = QLabel("Size: -")
-        self.size_label.setStyleSheet("color: #8b949e;")
-        stats_grid.addWidget(self.size_label)
-
-        progress_layout.addLayout(stats_grid)
+        progress_layout.addWidget(self.speed_label)
 
         progress_group.setLayout(progress_layout)
         download_layout.addWidget(progress_group)
@@ -1511,7 +1289,7 @@ class VideoDownloaderApp(QMainWindow):
         self.tabs.addTab(download_tab, "📥 Download")
 
     def create_playlist_tab(self):
-        """Create enhanced playlist management tab"""
+        """Create playlist tab"""
         playlist_tab = QWidget()
         playlist_layout = QVBoxLayout(playlist_tab)
 
@@ -1529,11 +1307,6 @@ class VideoDownloaderApp(QMainWindow):
 
         playlist_group_layout.addLayout(playlist_url_layout)
 
-        # Playlist info
-        self.playlist_info_label = QLabel("No playlist loaded")
-        self.playlist_info_label.setStyleSheet("color: #8b949e;")
-        playlist_group_layout.addWidget(self.playlist_info_label)
-
         self.playlist_list = QListWidget()
         self.playlist_list.setSelectionMode(QListWidget.MultiSelection)
         playlist_group_layout.addWidget(self.playlist_list)
@@ -1549,11 +1322,6 @@ class VideoDownloaderApp(QMainWindow):
         clear_selection_btn.clicked.connect(lambda: self.playlist_list.clearSelection())
         playlist_actions.addWidget(clear_selection_btn)
 
-        reverse_selection_btn = QPushButton("🔄 Reverse")
-        reverse_selection_btn.setObjectName("secondaryBtn")
-        reverse_selection_btn.clicked.connect(self.reverse_playlist_selection)
-        playlist_actions.addWidget(reverse_selection_btn)
-
         download_selected_btn = QPushButton("⬇ Download Selected")
         download_selected_btn.clicked.connect(self.download_playlist_selected)
         playlist_actions.addWidget(download_selected_btn)
@@ -1564,8 +1332,96 @@ class VideoDownloaderApp(QMainWindow):
 
         self.tabs.addTab(playlist_tab, "📚 Playlist")
 
+    def create_subtitle_tab(self):
+        """Create subtitle management tab"""
+        subtitle_tab = QWidget()
+        subtitle_layout = QVBoxLayout(subtitle_tab)
+        subtitle_layout.setSpacing(15)
+
+        url_group = QGroupBox("📎 Video URL")
+        url_layout = QVBoxLayout()
+
+        url_input_layout = QHBoxLayout()
+        self.sub_url_input = QLineEdit()
+        self.sub_url_input.setPlaceholderText("Paste video URL here...")
+        url_input_layout.addWidget(self.sub_url_input)
+
+        fetch_info_btn = QPushButton("🔍 Get Info")
+        fetch_info_btn.setObjectName("secondaryBtn")
+        fetch_info_btn.clicked.connect(self.fetch_video_info)
+        url_input_layout.addWidget(fetch_info_btn)
+
+        url_layout.addLayout(url_input_layout)
+        url_group.setLayout(url_layout)
+        subtitle_layout.addWidget(url_group)
+
+        settings_group = QGroupBox("⚙️ Subtitle Settings")
+        settings_layout = QVBoxLayout()
+
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(QLabel("Save to:"))
+        self.sub_path_input = QLineEdit()
+        self.sub_path_input.setText(self.settings.get('download_path',
+                                                      os.path.join(os.path.expanduser("~"), "Downloads")))
+        path_layout.addWidget(self.sub_path_input, 1)
+
+        browse_btn = QPushButton("📁 Browse")
+        browse_btn.setObjectName("secondaryBtn")
+        browse_btn.clicked.connect(self.browse_subtitle_folder)
+        path_layout.addWidget(browse_btn)
+        settings_layout.addLayout(path_layout)
+
+        lang_layout = QHBoxLayout()
+        lang_layout.addWidget(QLabel("Languages:"))
+        self.sub_lang_combo = QComboBox()
+        self.sub_lang_combo.addItems(["All Available", "English Only", "Custom Selection"])
+        lang_layout.addWidget(self.sub_lang_combo, 1)
+        settings_layout.addLayout(lang_layout)
+
+        format_layout = QHBoxLayout()
+        format_layout.addWidget(QLabel("Format:"))
+        self.sub_format_combo = QComboBox()
+        self.sub_format_combo.addItems(SUBTITLE_FORMATS)
+        format_layout.addWidget(self.sub_format_combo)
+        settings_layout.addLayout(format_layout)
+
+        self.sub_auto_gen_check = QCheckBox("🤖 Include Auto-Generated Subtitles")
+        self.sub_auto_gen_check.setChecked(True)
+        settings_layout.addWidget(self.sub_auto_gen_check)
+
+        settings_group.setLayout(settings_layout)
+        subtitle_layout.addWidget(settings_group)
+
+        progress_group = QGroupBox("📊 Download Progress")
+        progress_layout = QVBoxLayout()
+
+        self.sub_progress_bar = QProgressBar()
+        progress_layout.addWidget(self.sub_progress_bar)
+
+        status_layout = QHBoxLayout()
+        self.sub_status_label = QLabel("Ready to download subtitles")
+        self.sub_status_label.setStyleSheet("color: #7ee787; font-weight: bold;")
+        status_layout.addWidget(self.sub_status_label, 1)
+
+        download_only_btn = QPushButton("💬 Download Subtitles Only")
+        download_only_btn.clicked.connect(self.download_subtitles_only)
+        status_layout.addWidget(download_only_btn)
+
+        self.sub_cancel_btn = QPushButton("❌ Cancel")
+        self.sub_cancel_btn.setObjectName("cancelBtn")
+        self.sub_cancel_btn.setEnabled(False)
+        self.sub_cancel_btn.clicked.connect(self.cancel_download)
+        status_layout.addWidget(self.sub_cancel_btn)
+
+        progress_layout.addLayout(status_layout)
+        progress_group.setLayout(progress_layout)
+        subtitle_layout.addWidget(progress_group)
+
+        subtitle_layout.addStretch()
+        self.tabs.addTab(subtitle_tab, "💬 Subtitles")
+
     def create_history_tab(self):
-        """Create enhanced download history tab"""
+        """Create history tab"""
         history_tab = QWidget()
         history_layout = QVBoxLayout(history_tab)
 
@@ -1582,17 +1438,7 @@ class VideoDownloaderApp(QMainWindow):
 
         history_layout.addLayout(history_header)
 
-        # Search bar
-        search_layout = QHBoxLayout()
-        self.history_search = QLineEdit()
-        self.history_search.setPlaceholderText("🔍 Search history...")
-        self.history_search.textChanged.connect(self.filter_history)
-        search_layout.addWidget(self.history_search)
-        history_layout.addLayout(search_layout)
-
         self.history_list = QListWidget()
-        self.history_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.history_list.customContextMenuRequested.connect(self.show_history_context_menu)
         history_layout.addWidget(self.history_list)
 
         history_actions = QHBoxLayout()
@@ -1624,16 +1470,12 @@ class VideoDownloaderApp(QMainWindow):
         log_header.addWidget(log_label)
         log_header.addStretch()
 
-        self.auto_scroll_check = QCheckBox("Auto-scroll")
-        self.auto_scroll_check.setChecked(True)
-        log_header.addWidget(self.auto_scroll_check)
-
-        clear_log_btn = QPushButton("🗑 Clear")
+        clear_log_btn = QPushButton("🗑 Clear Log")
         clear_log_btn.setObjectName("secondaryBtn")
         clear_log_btn.clicked.connect(self.clear_log)
         log_header.addWidget(clear_log_btn)
 
-        save_log_btn = QPushButton("💾 Save")
+        save_log_btn = QPushButton("💾 Save Log")
         save_log_btn.setObjectName("secondaryBtn")
         save_log_btn.clicked.connect(self.save_log)
         log_header.addWidget(save_log_btn)
@@ -1658,12 +1500,12 @@ class VideoDownloaderApp(QMainWindow):
         code_header.addWidget(code_label)
         code_header.addStretch()
 
-        copy_code_btn = QPushButton("📋 Copy")
+        copy_code_btn = QPushButton("📋 Copy Code")
         copy_code_btn.setObjectName("secondaryBtn")
         copy_code_btn.clicked.connect(self.copy_code)
         code_header.addWidget(copy_code_btn)
 
-        save_code_btn = QPushButton("💾 Save")
+        save_code_btn = QPushButton("💾 Save as File")
         save_code_btn.setObjectName("secondaryBtn")
         save_code_btn.clicked.connect(self.save_code)
         code_header.addWidget(save_code_btn)
@@ -1678,7 +1520,7 @@ class VideoDownloaderApp(QMainWindow):
         self.tabs.addTab(code_tab, "💻 Code")
 
     def create_queue_tab(self):
-        """Create enhanced download queue tab"""
+        """Create queue tab"""
         queue_tab = QWidget()
         queue_layout = QVBoxLayout(queue_tab)
 
@@ -1696,8 +1538,8 @@ class VideoDownloaderApp(QMainWindow):
         queue_layout.addLayout(queue_header)
 
         self.queue_table = QTableWidget()
-        self.queue_table.setColumnCount(5)
-        self.queue_table.setHorizontalHeaderLabels(["#", "URL", "Priority", "Status", "Actions"])
+        self.queue_table.setColumnCount(4)
+        self.queue_table.setHorizontalHeaderLabels(["#", "URL", "Status", "Actions"])
         self.queue_table.horizontalHeader().setStretchLastSection(False)
         self.queue_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.queue_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1709,18 +1551,7 @@ class VideoDownloaderApp(QMainWindow):
         start_queue_btn.clicked.connect(self.start_queue_download)
         queue_actions.addWidget(start_queue_btn)
 
-        self.pause_queue_btn = QPushButton("⏸️ Pause Queue")
-        self.pause_queue_btn.setObjectName("pauseBtn")
-        self.pause_queue_btn.setEnabled(False)
-        self.pause_queue_btn.clicked.connect(self.pause_queue)
-        queue_actions.addWidget(self.pause_queue_btn)
-
-        clear_completed_btn = QPushButton("✓ Clear Completed")
-        clear_completed_btn.setObjectName("secondaryBtn")
-        clear_completed_btn.clicked.connect(self.clear_completed_queue)
-        queue_actions.addWidget(clear_completed_btn)
-
-        clear_queue_btn = QPushButton("🗑 Clear All")
+        clear_queue_btn = QPushButton("🗑 Clear Queue")
         clear_queue_btn.setObjectName("cancelBtn")
         clear_queue_btn.clicked.connect(self.clear_queue)
         queue_actions.addWidget(clear_queue_btn)
@@ -1730,88 +1561,8 @@ class VideoDownloaderApp(QMainWindow):
 
         self.tabs.addTab(queue_tab, "📋 Queue")
 
-    def create_statistics_tab(self):
-        """Create statistics and analytics tab"""
-        stats_tab = QWidget()
-        stats_layout = QVBoxLayout(stats_tab)
-
-        stats_header = QLabel("📊 Download Statistics & Analytics")
-        stats_header.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        stats_header.setStyleSheet("color: #58a6ff; margin-bottom: 10px;")
-        stats_layout.addWidget(stats_header)
-
-        # Overview stats
-        overview_group = QGroupBox("📈 Overview")
-        overview_layout = QGridLayout()
-
-        self.total_downloads_label = QLabel("Total Downloads: 0")
-        self.total_downloads_label.setStyleSheet("font-size: 12pt; color: #7ee787;")
-        overview_layout.addWidget(self.total_downloads_label, 0, 0)
-
-        self.successful_downloads_label = QLabel("Successful: 0")
-        self.successful_downloads_label.setStyleSheet("font-size: 12pt; color: #7ee787;")
-        overview_layout.addWidget(self.successful_downloads_label, 0, 1)
-
-        self.failed_downloads_label = QLabel("Failed: 0")
-        self.failed_downloads_label.setStyleSheet("font-size: 12pt; color: #f85149;")
-        overview_layout.addWidget(self.failed_downloads_label, 0, 2)
-
-        self.total_size_label = QLabel("Total Size: 0 B")
-        self.total_size_label.setStyleSheet("font-size: 12pt; color: #58a6ff;")
-        overview_layout.addWidget(self.total_size_label, 1, 0)
-
-        self.total_time_label = QLabel("Total Time: 0s")
-        self.total_time_label.setStyleSheet("font-size: 12pt; color: #58a6ff;")
-        overview_layout.addWidget(self.total_time_label, 1, 1)
-
-        self.avg_speed_label = QLabel("Avg Speed: 0 B/s")
-        self.avg_speed_label.setStyleSheet("font-size: 12pt; color: #58a6ff;")
-        overview_layout.addWidget(self.avg_speed_label, 1, 2)
-
-        overview_group.setLayout(overview_layout)
-        stats_layout.addWidget(overview_group)
-
-        # Recent activity
-        recent_group = QGroupBox("🕐 Recent Activity (Last 24h)")
-        recent_layout = QVBoxLayout()
-
-        self.recent_downloads_label = QLabel("Downloads: 0")
-        recent_layout.addWidget(self.recent_downloads_label)
-
-        self.recent_size_label = QLabel("Data Downloaded: 0 B")
-        recent_layout.addWidget(self.recent_size_label)
-
-        recent_group.setLayout(recent_layout)
-        stats_layout.addWidget(recent_group)
-
-        # Buttons
-        stats_actions = QHBoxLayout()
-
-        refresh_stats_btn = QPushButton("🔄 Refresh Statistics")
-        refresh_stats_btn.setObjectName("secondaryBtn")
-        refresh_stats_btn.clicked.connect(self.update_statistics_display)
-        stats_actions.addWidget(refresh_stats_btn)
-
-        export_stats_btn = QPushButton("💾 Export Statistics")
-        export_stats_btn.setObjectName("secondaryBtn")
-        export_stats_btn.clicked.connect(self.export_statistics)
-        stats_actions.addWidget(export_stats_btn)
-
-        reset_stats_btn = QPushButton("🗑 Reset Statistics")
-        reset_stats_btn.setObjectName("cancelBtn")
-        reset_stats_btn.clicked.connect(self.reset_statistics)
-        stats_actions.addWidget(reset_stats_btn)
-
-        stats_actions.addStretch()
-        stats_layout.addLayout(stats_actions)
-
-        stats_layout.addStretch()
-        self.tabs.addTab(stats_tab, "📊 Statistics")
-
-    # ===== HELPER METHODS =====
-
     def on_url_changed(self):
-        """Handle URL input changes"""
+        """Handle URL changes"""
         self.info_frame.setVisible(False)
         self.current_video_info = None
 
@@ -1819,8 +1570,14 @@ class VideoDownloaderApp(QMainWindow):
         """Toggle rate limit input"""
         self.rate_limit_input.setEnabled(checked)
 
+    def toggle_audio_only(self, checked):
+        """Toggle audio-only mode"""
+        self.quality_combo.setEnabled(not checked)
+        self.format_combo.setEnabled(not checked)
+        self.update_code()
+
     def load_settings(self):
-        """Load user settings from file"""
+        """Load settings from file"""
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r') as f:
@@ -1831,7 +1588,7 @@ class VideoDownloaderApp(QMainWindow):
             self.settings = {}
 
     def save_settings(self):
-        """Save user settings to file"""
+        """Save settings to file"""
         try:
             settings = {
                 'download_path': self.path_input.text(),
@@ -1844,7 +1601,6 @@ class VideoDownloaderApp(QMainWindow):
                 'retries': self.retries_spin.value(),
                 'concurrent': self.concurrent_spin.value(),
                 'ignore_errors': self.ignore_errors_check.isChecked(),
-                'filename_template': self.filename_template.text(),
             }
             with open(self.settings_file, 'w') as f:
                 json.dump(settings, f, indent=2)
@@ -1852,7 +1608,7 @@ class VideoDownloaderApp(QMainWindow):
             self.log_message(f"Failed to save settings: {str(e)}")
 
     def load_history(self):
-        """Load download history from file"""
+        """Load download history"""
         history_file = os.path.join(os.path.expanduser("~"), ".video_downloader_history.json")
         try:
             if os.path.exists(history_file):
@@ -1865,7 +1621,7 @@ class VideoDownloaderApp(QMainWindow):
             pass
 
     def save_history(self):
-        """Save download history to file"""
+        """Save download history"""
         history_file = os.path.join(os.path.expanduser("~"), ".video_downloader_history.json")
         try:
             with open(history_file, 'w') as f:
@@ -1874,34 +1630,19 @@ class VideoDownloaderApp(QMainWindow):
             self.log_message(f"Failed to save history: {str(e)}")
 
     def browse_folder(self):
-        """Open folder browser dialog"""
+        """Browse for download folder"""
         folder = QFileDialog.getExistingDirectory(self, "Select Download Folder")
         if folder:
             self.path_input.setText(folder)
 
-    def toggle_audio_only(self, checked):
-        """Enable/disable quality selection based on audio only mode"""
-        self.quality_combo.setEnabled(not checked)
-        self.format_combo.setEnabled(not checked)
-        self.update_code()
-
-    def get_quality_value(self):
-        """Get quality value from combo box"""
-        quality_map = {
-            "Best Available (Auto)": "best",
-            "8K (4320p)": "4320",
-            "4K (2160p)": "2160",
-            "2K (1440p)": "1440",
-            "Full HD (1080p)": "1080",
-            "HD (720p)": "720",
-            "SD (480p)": "480",
-            "Low (360p)": "360",
-            "Mobile (240p)": "240"
-        }
-        return quality_map[self.quality_combo.currentText()]
+    def browse_subtitle_folder(self):
+        """Browse for subtitle folder"""
+        folder = QFileDialog.getExistingDirectory(self, "Select Subtitle Folder")
+        if folder:
+            self.sub_path_input.setText(folder)
 
     def format_bytes(self, bytes_val):
-        """Format bytes to human readable format"""
+        """Format bytes to readable format"""
         if not bytes_val:
             return "0 B"
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
@@ -1911,7 +1652,7 @@ class VideoDownloaderApp(QMainWindow):
         return f"{bytes_val:.2f} PB"
 
     def format_duration(self, seconds):
-        """Format duration in seconds to readable format"""
+        """Format duration to readable format"""
         if not seconds:
             return "Unknown"
         hours = int(seconds // 3600)
@@ -1925,21 +1666,17 @@ class VideoDownloaderApp(QMainWindow):
             return f"{secs}s"
 
     def log_message(self, message):
-        """Add message to log with auto-scroll"""
+        """Add message to log"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted_msg = f"[{timestamp}] {message}"
         self.log_text.append(formatted_msg)
-
-        if self.auto_scroll_check.isChecked():
-            self.log_text.verticalScrollBar().setValue(
-                self.log_text.verticalScrollBar().maximum()
-            )
-
-        short_msg = message[:50] + "..." if len(message) > 50 else message
-        self.status_message.setText(short_msg)
+        self.log_text.verticalScrollBar().setValue(
+            self.log_text.verticalScrollBar().maximum()
+        )
+        self.status_message.setText(message[:50] + "..." if len(message) > 50 else message)
 
     def clear_log(self):
-        """Clear the log"""
+        """Clear log"""
         self.log_text.clear()
         self.log_message("Log cleared")
 
@@ -1959,11 +1696,9 @@ class VideoDownloaderApp(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save log:\n{str(e)}")
 
-    # ===== VIDEO INFO METHODS =====
-
     def fetch_video_info(self):
-        """Fetch detailed video information"""
-        url = self.url_input.text().strip()
+        """Fetch video information"""
+        url = self.url_input.text().strip() or self.sub_url_input.text().strip()
         if not url:
             QMessageBox.warning(self, "Error", "Please enter a valid URL!")
             return
@@ -1981,7 +1716,7 @@ class VideoDownloaderApp(QMainWindow):
         self.info_thread.start()
 
     def display_video_info(self, info):
-        """Display enhanced video information"""
+        """Display video information"""
         self.current_video_info = info
         self.fetch_info_btn.setEnabled(True)
         self.fetch_info_btn.setText("🔍 Get Info")
@@ -1989,23 +1724,14 @@ class VideoDownloaderApp(QMainWindow):
         title = info.get('title', 'Unknown')
         duration = self.format_duration(info.get('duration', 0))
         uploader = info.get('uploader', 'Unknown')
-        upload_date = info.get('upload_date', '')
-        if upload_date:
-            try:
-                upload_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
-            except:
-                pass
         views = info.get('view_count', 0)
-        likes = info.get('like_count', 0)
         filesize = info.get('filesize', 0) or info.get('filesize_approx', 0)
 
         self.video_title_label.setText(f"Title: {title}")
-        self.video_duration_label.setText(f"⏱️ {duration}")
-        self.video_uploader_label.setText(f"👤 {uploader}")
-        self.video_upload_date_label.setText(f"📅 {upload_date if upload_date else 'N/A'}")
-        self.video_views_label.setText(f"👁️ {views:,}" if views else "👁️ N/A")
-        self.video_likes_label.setText(f"👍 {likes:,}" if likes else "👍 N/A")
-        self.video_size_label.setText(f"💾 {self.format_bytes(filesize)}" if filesize else "💾 N/A")
+        self.video_duration_label.setText(f"⏱️ Duration: {duration}")
+        self.video_uploader_label.setText(f"👤 Uploader: {uploader}")
+        self.video_views_label.setText(f"👁️ Views: {views:,}" if views else "👁️ Views: N/A")
+        self.video_size_label.setText(f"💾 Est. Size: {self.format_bytes(filesize)}" if filesize else "💾 Est. Size: N/A")
 
         self.info_frame.setVisible(True)
         self.log_message(f"Info fetched: {title}")
@@ -2017,10 +1743,8 @@ class VideoDownloaderApp(QMainWindow):
         self.log_message(f"Error fetching info: {error}")
         QMessageBox.warning(self, "Error", f"Failed to fetch video info:\n{error}")
 
-    # ===== PLAYLIST METHODS =====
-
     def fetch_playlist_info(self):
-        """Fetch enhanced playlist information"""
+        """Fetch playlist information"""
         url = self.playlist_url_input.text().strip()
         if not url:
             QMessageBox.warning(self, "Error", "Please enter a playlist URL!")
@@ -2030,7 +1754,6 @@ class VideoDownloaderApp(QMainWindow):
             return
 
         self.playlist_list.clear()
-        self.playlist_info_label.setText("Loading playlist...")
         self.log_message(f"Fetching playlist: {url}")
 
         self.playlist_thread = PlaylistInfoThread(url)
@@ -2041,49 +1764,28 @@ class VideoDownloaderApp(QMainWindow):
 
     def update_playlist_progress(self, current, total):
         """Update playlist loading progress"""
-        self.playlist_info_label.setText(f"Loading: {current}/{total} videos")
+        self.log_message(f"Loading playlist: {current}/{total} videos")
 
     def display_playlist_info(self, videos):
-        """Display enhanced playlist videos"""
+        """Display playlist videos"""
         self.playlist_list.clear()
-        total_duration = 0
-
         for i, video in enumerate(videos, 1):
-            duration = video.get('duration', 0)
-            total_duration += duration
-            duration_str = self.format_duration(duration)
-            uploader = video.get('uploader', 'Unknown')
-            views = video.get('view_count', 0)
-            views_str = f"{views:,}" if views else "N/A"
-
-            item_text = f"{i}. {video['title']} | {duration_str} | 👤 {uploader} | 👁️ {views_str}"
+            duration = self.format_duration(video.get('duration', 0))
+            item_text = f"{i}. {video['title']} [{duration}]"
             item = QListWidgetItem(item_text)
             item.setData(Qt.UserRole, video)
             self.playlist_list.addItem(item)
 
-        total_duration_str = self.format_duration(total_duration)
-        self.playlist_info_label.setText(
-            f"Loaded {len(videos)} videos | Total Duration: {total_duration_str}"
-        )
-
         self.log_message(f"Loaded {len(videos)} videos from playlist")
-        QMessageBox.information(self, "Success",
-                                f"Loaded {len(videos)} videos!\nTotal Duration: {total_duration_str}")
+        QMessageBox.information(self, "Success", f"Loaded {len(videos)} videos from playlist!")
 
     def playlist_fetch_error(self, error):
         """Handle playlist fetch error"""
-        self.playlist_info_label.setText("Failed to load playlist")
         self.log_message(f"Error fetching playlist: {error}")
         QMessageBox.warning(self, "Error", f"Failed to fetch playlist:\n{error}")
 
-    def reverse_playlist_selection(self):
-        """Reverse playlist selection"""
-        for i in range(self.playlist_list.count()):
-            item = self.playlist_list.item(i)
-            item.setSelected(not item.isSelected())
-
     def download_playlist_selected(self):
-        """Download selected videos from playlist"""
+        """Download selected playlist items"""
         selected_items = self.playlist_list.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "Error", "Please select videos to download!")
@@ -2092,7 +1794,7 @@ class VideoDownloaderApp(QMainWindow):
         urls = []
         for item in selected_items:
             video = item.data(Qt.UserRole)
-            if video and video.get('id'):
+            if video and video.get('url'):
                 urls.append(f"https://www.youtube.com/watch?v={video['id']}")
 
         if urls:
@@ -2104,12 +1806,10 @@ class VideoDownloaderApp(QMainWindow):
             if reply == QMessageBox.Yes:
                 for url in urls:
                     self.add_url_to_queue(url)
-                self.tabs.setCurrentIndex(5)
-
-    # ===== QUEUE METHODS =====
+                self.tabs.setCurrentIndex(6)
 
     def add_to_queue(self):
-        """Add current URL to download queue"""
+        """Add URL to queue"""
         url = self.url_input.text().strip()
         if not url:
             QMessageBox.warning(self, "Error", "Please enter a valid URL!")
@@ -2117,27 +1817,21 @@ class VideoDownloaderApp(QMainWindow):
 
         self.add_url_to_queue(url)
 
-    def add_url_to_queue(self, url, priority="Normal"):
+    def add_url_to_queue(self, url):
         """Add URL to queue table"""
         row_position = self.queue_table.rowCount()
         self.queue_table.insertRow(row_position)
 
         self.queue_table.setItem(row_position, 0, QTableWidgetItem(str(row_position + 1)))
         self.queue_table.setItem(row_position, 1, QTableWidgetItem(url))
-
-        priority_combo = QComboBox()
-        priority_combo.addItems(["High", "Normal", "Low"])
-        priority_combo.setCurrentText(priority)
-        self.queue_table.setCellWidget(row_position, 2, priority_combo)
-
-        self.queue_table.setItem(row_position, 3, QTableWidgetItem("⏳ Pending"))
+        self.queue_table.setItem(row_position, 2, QTableWidgetItem("⏳ Pending"))
 
         remove_btn = QPushButton("🗑")
         remove_btn.setObjectName("cancelBtn")
         remove_btn.clicked.connect(lambda: self.remove_from_queue(row_position))
-        self.queue_table.setCellWidget(row_position, 4, remove_btn)
+        self.queue_table.setCellWidget(row_position, 3, remove_btn)
 
-        self.download_queue.append({'url': url, 'status': 'pending', 'priority': priority})
+        self.download_queue.append({'url': url, 'status': 'pending'})
         self.update_queue_count()
         self.log_message(f"Added to queue: {url}")
 
@@ -2170,31 +1864,13 @@ class VideoDownloaderApp(QMainWindow):
             self.update_queue_count()
             self.log_message("Queue cleared")
 
-    def clear_completed_queue(self):
-        """Clear completed items from queue"""
-        rows_to_remove = []
-        for i, item in enumerate(self.download_queue):
-            if item['status'] == 'completed':
-                rows_to_remove.append(i)
-
-        for i in reversed(rows_to_remove):
-            del self.download_queue[i]
-            self.queue_table.removeRow(i)
-
-        for i in range(self.queue_table.rowCount()):
-            self.queue_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-
-        self.update_queue_count()
-        self.log_message(f"Cleared {len(rows_to_remove)} completed items")
-
     def update_queue_count(self):
         """Update queue count label"""
         count = len(self.download_queue)
-        pending = sum(1 for item in self.download_queue if item['status'] == 'pending')
-        self.queue_count_label.setText(f"{count} items ({pending} pending)")
+        self.queue_count_label.setText(f"{count} item{'s' if count != 1 else ''}")
 
     def start_queue_download(self):
-        """Start downloading queue"""
+        """Start queue download"""
         if not self.download_queue:
             QMessageBox.information(self, "Info", "Queue is empty!")
             return
@@ -2216,153 +1892,98 @@ class VideoDownloaderApp(QMainWindow):
         self.batch_thread.all_finished.connect(self.batch_all_finished)
         self.batch_thread.start()
 
-        self.pause_queue_btn.setEnabled(True)
         self.log_message(f"Starting batch download of {len(urls)} items")
 
-    def pause_queue(self):
-        """Pause/resume queue download"""
-        if self.batch_thread and self.batch_thread.isRunning():
-            if self.batch_thread._is_paused:
-                self.batch_thread.resume()
-                self.pause_queue_btn.setText("⏸️ Pause Queue")
-                self.log_message("Queue resumed")
-            else:
-                self.batch_thread.pause()
-                self.pause_queue_btn.setText("▶️ Resume Queue")
-                self.log_message("Queue paused")
-
     def update_batch_progress(self, current, total, url):
-        """Update batch download progress"""
+        """Update batch progress"""
         self.log_message(f"Downloading {current}/{total}: {url}")
 
         for i, item in enumerate(self.download_queue):
             if item['url'] == url:
-                self.queue_table.setItem(i, 3, QTableWidgetItem(f"⬇️ Downloading ({current}/{total})"))
+                self.queue_table.setItem(i, 2, QTableWidgetItem(f"⬇️ Downloading ({current}/{total})"))
                 break
 
     def batch_item_finished(self, success, url, message):
-        """Handle individual batch item finish"""
+        """Handle batch item finish"""
         self.log_message(message)
 
         for i, item in enumerate(self.download_queue):
             if item['url'] == url:
                 if success:
-                    self.queue_table.setItem(i, 3, QTableWidgetItem("✅ Completed"))
+                    self.queue_table.setItem(i, 2, QTableWidgetItem("✅ Completed"))
                     item['status'] = 'completed'
                 else:
-                    self.queue_table.setItem(i, 3, QTableWidgetItem("❌ Failed"))
+                    self.queue_table.setItem(i, 2, QTableWidgetItem("❌ Failed"))
                     item['status'] = 'failed'
                 break
 
     def batch_all_finished(self, successful, failed):
-        """Handle batch download completion"""
-        self.pause_queue_btn.setEnabled(False)
-        self.pause_queue_btn.setText("⏸️ Pause Queue")
+        """Handle batch completion"""
         self.log_message(f"Batch download finished: {successful} successful, {failed} failed")
         QMessageBox.information(
             self, "Batch Download Complete",
             f"Batch download finished!\n\nSuccessful: {successful}\nFailed: {failed}"
         )
 
-    # ===== DOWNLOAD METHODS =====
+    def get_quality_value(self):
+        """Get quality value"""
+        quality_map = {
+            "Best Available (Auto)": "best",
+            "8K (4320p)": "4320",
+            "4K (2160p)": "2160",
+            "2K (1440p)": "1440",
+            "Full HD (1080p)": "1080",
+            "HD (720p)": "720",
+            "SD (480p)": "480",
+            "Low (360p)": "360",
+            "Mobile (240p)": "240"
+        }
+        return quality_map[self.quality_combo.currentText()]
 
-    def get_download_options(self):
-        """Get enhanced download options"""
-        quality = self.get_quality_value()
-        format_type = self.format_combo.currentText()
-        audio_only = self.audio_only_check.isChecked()
-        audio_quality = self.audio_quality_combo.currentText().split()[0]
+    def show_subtitle_dialog(self):
+        """Show subtitle options dialog"""
+        dialog = SubtitleDownloadDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.subtitle_config = dialog.get_options()
+            self.log_message("Subtitle options configured")
+            self.update_code()
 
-        if audio_only:
-            format_str = "bestaudio/best"
-        else:
-            if quality == "best":
-                format_str = "bestvideo+bestaudio/best"
-            else:
-                format_str = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]"
+    def apply_subtitle_options(self, ydl_opts):
+        """Apply subtitle options to download options"""
+        if not (self.download_subs_check.isChecked() or hasattr(self, 'subtitle_config')):
+            return ydl_opts
 
-        postprocessors = []
-        if audio_only:
-            postprocessors.append({
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': self.audio_format_combo.currentText(),
-                'preferredquality': audio_quality,
-            })
-        else:
-            postprocessors.append({
-                'key': 'FFmpegVideoConvertor',
-                'preferedformat': format_type,
-            })
-
-        if self.embed_thumbnail_check.isChecked():
-            postprocessors.append({'key': 'EmbedThumbnail'})
-
-        if self.embed_subs_check.isChecked():
-            postprocessors.append({'key': 'FFmpegEmbedSubtitle'})
-
-        if self.sponsorblock_check.isChecked():
-            postprocessors.append({
-                'key': 'SponsorBlock',
-                'categories': ['sponsor', 'intro', 'outro', 'selfpromo']
-            })
-
-        filename_template = self.filename_template.text() or '%(title)s.%(ext)s'
-
-        ydl_opts = {
-            'format': format_str,
-            'outtmpl': os.path.join(self.path_input.text(), filename_template),
-            'merge_output_format': format_type,
-            'ignoreerrors': self.ignore_errors_check.isChecked(),
-            'no_warnings': False,
-            'quiet': False,
-            'retries': self.retries_spin.value(),
-            'fragment_retries': self.retries_spin.value(),
-            'concurrent_fragment_downloads': self.concurrent_spin.value(),
-            'windowsfilenames': True,
-            'postprocessors': postprocessors,
-            'socket_timeout': self.timeout_spin.value(),
-            'geo_bypass': self.geo_bypass_check.isChecked(),
-            'auto_update': True,
+        config = self.subtitle_config or {
+            'download_all': self.download_subs_check.isChecked(),
+            'selected_languages': ['en'],
+            'auto_generated': True,
+            'embed': self.embed_subs_check.isChecked(),
+            'format': 'auto'
         }
 
-        if self.download_subs_check.isChecked():
-            ydl_opts['writesubtitles'] = True
-            ydl_opts['allsubtitles'] = True
+        subtitle_opts = self.subtitle_manager.build_subtitle_options(
+            download_all=config.get('download_all', True),
+            languages=config.get('selected_languages', ['en']),
+            auto_generated=config.get('auto_generated', True),
+            format_type=config.get('format', 'auto')
+        )
+        ydl_opts.update(subtitle_opts)
 
-        if self.write_description_check.isChecked():
-            ydl_opts['writedescription'] = True
-
-        if self.write_thumbnail_check.isChecked():
-            ydl_opts['writethumbnail'] = True
-
-        if self.write_metadata_check.isChecked():
-            ydl_opts['writeinfojson'] = True
-
-        if self.write_comments_check.isChecked():
-            ydl_opts['writecomments'] = True
-            ydl_opts['getcomments'] = True
-
-        if self.no_playlist_check.isChecked():
-            ydl_opts['noplaylist'] = True
-
-        if self.limit_rate_check.isChecked() and self.rate_limit_input.text():
-            ydl_opts['ratelimit'] = self.rate_limit_input.text()
+        if config.get('embed', False):
+            if 'postprocessors' not in ydl_opts:
+                ydl_opts['postprocessors'] = []
+            ydl_opts['postprocessors'].append({'key': 'FFmpegEmbedSubtitle'})
 
         return ydl_opts
 
-    def start_download(self):
-        """Start the enhanced download process"""
-        url = self.url_input.text().strip()
-
+    def download_subtitles_only(self):
+        """Download only subtitles"""
+        url = self.sub_url_input.text().strip()
         if not url:
             QMessageBox.warning(self, "Error", "Please enter a valid URL!")
             return
 
-        if self.download_thread and self.download_thread.isRunning():
-            QMessageBox.warning(self, "Error", "A download is already in progress!")
-            return
-
-        output_path = self.path_input.text()
+        output_path = self.sub_path_input.text()
         if not os.path.exists(output_path):
             try:
                 os.makedirs(output_path)
@@ -2370,115 +1991,59 @@ class VideoDownloaderApp(QMainWindow):
                 QMessageBox.warning(self, "Error", "Invalid output path!")
                 return
 
-        ydl_opts = self.get_download_options()
+        config = {
+            'download_all': self.sub_lang_combo.currentText() == "All Available",
+            'selected_languages': ['en'],
+            'auto_generated': self.sub_auto_gen_check.isChecked(),
+            'embed': False,
+            'format': self.sub_format_combo.currentText()
+        }
+
+        ydl_opts = {
+            'skip_download': True,
+            'outtmpl': os.path.join(output_path, '%(title)s.%(ext)s'),
+            'quiet': False,
+            'no_warnings': False,
+        }
+
+        ydl_opts = self.apply_subtitle_options_subs_only(ydl_opts, config)
 
         self.download_thread = DownloadThread(url, ydl_opts)
-        self.download_thread.progress.connect(self.update_progress)
-        self.download_thread.finished.connect(self.download_finished)
+        self.download_thread.progress.connect(self.update_progress_subs)
+        self.download_thread.finished.connect(self.download_finished_subs)
         self.download_thread.log_message.connect(self.log_message)
         self.download_thread.start()
 
-        self.download_btn.setEnabled(False)
-        self.download_btn.setText("⏳ Downloading...")
-        self.pause_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(True)
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Initializing download...")
-        self.status_label.setStyleSheet("color: #58a6ff; font-weight: bold;")
+        self.sub_status_label.setText("Downloading subtitles...")
+        self.sub_status_label.setStyleSheet("color: #58a6ff; font-weight: bold;")
+        self.sub_cancel_btn.setEnabled(True)
+        self.log_message("Starting subtitle-only download")
 
-        self.save_settings()
+    def apply_subtitle_options_subs_only(self, ydl_opts, config):
+        """Apply subtitle options for subtitle-only downloads"""
+        subtitle_opts = self.subtitle_manager.build_subtitle_options(
+            download_all=config.get('download_all', True),
+            languages=config.get('selected_languages', ['en']),
+            auto_generated=config.get('auto_generated', True),
+            format_type=config.get('format', 'auto')
+        )
+        ydl_opts.update(subtitle_opts)
+        return ydl_opts
 
-    def pause_download(self):
-        """Pause/resume download"""
-        if self.download_thread and self.download_thread.isRunning():
-            if self.download_thread._is_paused:
-                self.download_thread.resume()
-                self.pause_btn.setText("⏸️ Pause")
-                self.status_label.setText("Download resumed")
-            else:
-                self.download_thread.pause()
-                self.pause_btn.setText("▶️ Resume")
-                self.status_label.setText("Download paused")
-
-    def cancel_download(self):
-        """Cancel ongoing download"""
-        if self.download_thread and self.download_thread.isRunning():
-            reply = QMessageBox.question(
-                self, "Cancel Download",
-                "Are you sure you want to cancel the download?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                self.download_thread.cancel()
-                self.log_message("Download cancelled by user")
-
-    def update_progress(self, data):
-        """Update enhanced progress display"""
+    def update_progress_subs(self, data):
+        """Update subtitle download progress"""
         if data['status'] == 'downloading':
             percent = int(data['percent'])
-            self.progress_bar.setValue(percent)
+            self.sub_progress_bar.setValue(percent)
 
-            speed = data.get('speed', 0)
-            eta = data.get('eta', 0)
-            downloaded = data.get('downloaded', 0)
-            total = data.get('total', 0)
-            elapsed = data.get('elapsed', 0)
-
-            speed_str = self.format_bytes(speed) + "/s" if speed else "N/A"
-            eta_str = f"{eta}s" if eta else "N/A"
-            downloaded_str = self.format_bytes(downloaded)
-            total_str = self.format_bytes(total) if total else "N/A"
-
-            self.status_label.setText(f"Downloading: {percent}%")
-            self.speed_label.setText(f"Speed: {speed_str}")
-            self.eta_label.setText(f"ETA: {eta_str}")
-            self.size_label.setText(f"Size: {downloaded_str} / {total_str}")
-
-        elif data['status'] == 'processing':
-            self.progress_bar.setValue(100)
-            self.status_label.setText("Processing and merging files...")
-            self.speed_label.setText("Almost done...")
-
-    def download_finished(self, success, message, filepath):
-        """Handle enhanced download completion"""
-        self.download_btn.setEnabled(True)
-        self.download_btn.setText("⬇ Download")
-        self.pause_btn.setEnabled(False)
-        self.pause_btn.setText("⏸️ Pause")
-        self.cancel_btn.setEnabled(False)
+    def download_finished_subs(self, success, message, filepath):
+        """Handle subtitle download finish"""
+        self.sub_cancel_btn.setEnabled(False)
 
         if success:
-            self.progress_bar.setValue(100)
-            self.status_label.setText("✅ " + message)
-            self.status_label.setStyleSheet("color: #7ee787; font-weight: bold;")
-            self.speed_label.setText("Completed!")
-
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            quality = self.quality_combo.currentText()
-            format_type = self.format_combo.currentText().upper()
-            video_title = self.current_video_info.get('title', 'Unknown') if self.current_video_info else 'Unknown'
-
-            history_entry = f"[{timestamp}] {video_title} | {quality} | {format_type}"
-            self.history_list.insertItem(0, history_entry)
-            self.download_history.insert(0, history_entry)
-
-            if len(self.download_history) > 100:
-                self.download_history = self.download_history[:100]
-                self.history_list.takeItem(100)
-
-            self.download_statistics['total_downloads'] += 1
-            self.download_statistics['successful_downloads'] += 1
-            if self.current_video_info:
-                filesize = self.current_video_info.get('filesize', 0) or self.current_video_info.get('filesize_approx',
-                                                                                                     0)
-                self.download_statistics['total_bytes'] += filesize
-
-            self.save_history()
-            self.save_statistics()
-            self.update_history_count()
-            self.update_stats()
-            self.update_statistics_display()
-
+            self.sub_progress_bar.setValue(100)
+            self.sub_status_label.setText("✅ Subtitles downloaded successfully!")
+            self.sub_status_label.setStyleSheet("color: #7ee787; font-weight: bold;")
             self.log_message(f"✅ {message}")
 
             msg_box = QMessageBox(self)
@@ -2497,54 +2062,22 @@ class VideoDownloaderApp(QMainWindow):
             self.status_label.setText("❌ Download failed")
             self.status_label.setStyleSheet("color: #f85149; font-weight: bold;")
             self.speed_label.setText("-")
-            self.download_statistics['total_downloads'] += 1
-            self.download_statistics['failed_downloads'] += 1
-            self.save_statistics()
-            self.update_statistics_display()
             self.log_message(f"❌ {message}")
             QMessageBox.critical(self, "Error", message)
 
-    # ===== HISTORY METHODS =====
-
     def update_history_count(self):
-        """Update history count label"""
+        """Update history count"""
         count = len(self.download_history)
         self.history_count_label.setText(f"{count} download{'s' if count != 1 else ''}")
         self.downloads_count_status.setText(f"Downloads: {count}")
 
     def update_stats(self):
-        """Update statistics label"""
+        """Update statistics"""
         count = len(self.download_history)
         self.stats_label.setText(f"Ready | Downloads: {count}")
 
-    def filter_history(self, text):
-        """Filter history based on search text"""
-        for i in range(self.history_list.count()):
-            item = self.history_list.item(i)
-            item.setHidden(text.lower() not in item.text().lower())
-
-    def show_history_context_menu(self, position):
-        """Show context menu for history items"""
-        item = self.history_list.itemAt(position)
-        if item:
-            menu = QMenu()
-            copy_action = menu.addAction("📋 Copy")
-            delete_action = menu.addAction("🗑 Delete")
-
-            action = menu.exec_(self.history_list.mapToGlobal(position))
-
-            if action == copy_action:
-                clipboard = QApplication.clipboard()
-                clipboard.setText(item.text())
-            elif action == delete_action:
-                row = self.history_list.row(item)
-                self.history_list.takeItem(row)
-                del self.download_history[row]
-                self.save_history()
-                self.update_history_count()
-
     def export_history(self):
-        """Export history to file"""
+        """Export history"""
         if not self.download_history:
             QMessageBox.information(self, "Info", "No history to export!")
             return
@@ -2552,7 +2085,7 @@ class VideoDownloaderApp(QMainWindow):
         filename, _ = QFileDialog.getSaveFileName(
             self, "Export History",
             f"download_history_{datetime.now().strftime('%Y%m%d')}.txt",
-            "Text Files (*.txt);;JSON Files (*.json);;CSV Files (*.csv);;All Files (*)"
+            "Text Files (*.txt);;JSON Files (*.json);;All Files (*)"
         )
 
         if filename:
@@ -2560,11 +2093,6 @@ class VideoDownloaderApp(QMainWindow):
                 if filename.endswith('.json'):
                     with open(filename, 'w', encoding='utf-8') as f:
                         json.dump(self.download_history, f, indent=2)
-                elif filename.endswith('.csv'):
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        f.write("Timestamp,Title,Quality,Format\n")
-                        for entry in self.download_history:
-                            f.write(entry.replace(' | ', ',') + '\n')
                 else:
                     with open(filename, 'w', encoding='utf-8') as f:
                         f.write("Download History\n")
@@ -2578,7 +2106,7 @@ class VideoDownloaderApp(QMainWindow):
                 QMessageBox.critical(self, "Error", f"Failed to export history:\n{str(e)}")
 
     def clear_history(self):
-        """Clear download history"""
+        """Clear history"""
         if not self.download_history:
             QMessageBox.information(self, "Info", "History is already empty!")
             return
@@ -2596,71 +2124,59 @@ class VideoDownloaderApp(QMainWindow):
             self.update_history_count()
             self.update_stats()
             self.log_message("History cleared")
-
-    # ===== STATISTICS METHODS =====
-
-    def update_statistics_display(self):
-        """Update statistics display"""
-        stats = self.download_statistics
-
-        self.total_downloads_label.setText(f"Total Downloads: {stats['total_downloads']}")
-        self.successful_downloads_label.setText(f"Successful: {stats['successful_downloads']}")
-        self.failed_downloads_label.setText(f"Failed: {stats['failed_downloads']}")
-        self.total_size_label.setText(f"Total Size: {self.format_bytes(stats['total_bytes'])}")
-        self.total_time_label.setText(f"Total Time: {self.format_duration(stats['total_time'])}")
-
-        avg_speed = stats['total_bytes'] / stats['total_time'] if stats['total_time'] > 0 else 0
-        self.avg_speed_label.setText(f"Avg Speed: {self.format_bytes(avg_speed)}/s")
-
-    def export_statistics(self):
-        """Export statistics"""
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Statistics",
-            f"download_stats_{datetime.now().strftime('%Y%m%d')}.json",
-            "JSON Files (*.json);;All Files (*)"
-        )
-
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    json.dump(self.download_statistics, f, indent=2)
-                self.log_message(f"Statistics exported to: {filename}")
-                QMessageBox.information(self, "Success", f"Statistics exported to:\n{filename}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export statistics:\n{str(e)}")
-
-    def reset_statistics(self):
-        """Reset statistics"""
-        reply = QMessageBox.question(
-            self, "Reset Statistics",
-            "Are you sure you want to reset all statistics?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-
-        if reply == QMessageBox.Yes:
-            self.download_statistics = {
-                'total_downloads': 0,
-                'total_bytes': 0,
-                'total_time': 0,
-                'successful_downloads': 0,
-                'failed_downloads': 0
-            }
-            self.save_statistics()
-            self.update_statistics_display()
-            self.log_message("Statistics reset")
-
-    # ===== CODE GENERATOR =====
+            QMessageBox.information(self, "Success", "History cleared!")
 
     def update_code(self):
         """Update generated code"""
         quality = self.get_quality_value()
         format_type = self.format_combo.currentText()
         audio_only = self.audio_only_check.isChecked()
+        audio_quality = self.audio_quality_combo.currentText().split()[0]
+
+        if audio_only:
+            format_str = "bestaudio/best"
+        else:
+            if quality == "best":
+                format_str = "bestvideo+bestaudio/best"
+            else:
+                format_str = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]"
+
+        postprocessors = []
+        if audio_only:
+            postprocessors.append(f"""{{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': '{self.audio_format_combo.currentText()}',
+        'preferredquality': '{audio_quality}',
+    }}""")
+        else:
+            postprocessors.append(f"""{{
+        'key': 'FFmpegVideoConvertor',
+        'preferedformat': '{format_type}',
+    }}""")
+
+        if self.embed_thumbnail_check.isChecked():
+            postprocessors.append("{'key': 'EmbedThumbnail'}")
+
+        postprocessors_str = ",\n    ".join(postprocessors)
+
+        additional_opts = []
+        if self.download_subs_check.isChecked():
+            additional_opts.append("'writesubtitles': True,\n    'allsubtitles': True,")
+        if self.write_description_check.isChecked():
+            additional_opts.append("'writedescription': True,")
+        if self.write_thumbnail_check.isChecked():
+            additional_opts.append("'writethumbnail': True,")
+        if self.no_playlist_check.isChecked():
+            additional_opts.append("'noplaylist': True,")
+        if self.limit_rate_check.isChecked() and self.rate_limit_input.text():
+            additional_opts.append(f"'ratelimit': '{self.rate_limit_input.text()}',")
+
+        additional_opts_str = "\n    ".join(additional_opts)
 
         code = f"""#!/usr/bin/env python3
 \"\"\"
 Video Downloader Script
-Generated by Video Downloader Pro v3.0
+Generated by Video Downloader Pro v2.0
 Date: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 \"\"\"
 
@@ -2668,26 +2184,58 @@ import yt_dlp
 import sys
 
 def download_video(url):
+    \"\"\"Download video with specified options\"\"\"
+
     ydl_opts = {{
-        'format': '{"bestaudio/best" if audio_only else f"bestvideo[height<={quality}]+bestaudio/best"}',
-        'outtmpl': r'{self.path_input.text()}{os.sep}{self.filename_template.text() or "%(title)s.%(ext)s"}',
+        'format': '{format_str}',
+        'outtmpl': r'{self.path_input.text()}{os.sep}%(title)s.%(ext)s',
         'merge_output_format': '{format_type}',
+
+        # Error handling
+        'ignoreerrors': {self.ignore_errors_check.isChecked()},
+        'no_warnings': False,
+        'quiet': False,
         'retries': {self.retries_spin.value()},
+        'fragment_retries': {self.retries_spin.value()},
         'concurrent_fragment_downloads': {self.concurrent_spin.value()},
+
+        # File naming
+        'windowsfilenames': True,
+        'restrictfilenames': False,
+
+        {additional_opts_str}
+
+        # Post-processing
+        'postprocessors': [
+        {postprocessors_str}
+        ],
     }}
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            print("Download completed!")
+            try:
+                print("Checking for yt-dlp updates...")
+                ydl.update()
+                print("yt-dlp is up to date")
+            except Exception as e:
+                print(f"Auto-update skipped: {{e}}")
+
+            print(f"Downloading: {{url}}")
+            info = ydl.extract_info(url, download=True)
+            print(f"\\nSuccessfully downloaded: {{info.get('title', 'Unknown')}}")
             return True
     except Exception as e:
-        print(f"Error: {{e}}")
+        print(f"Error downloading video: {{e}}")
         return False
 
 if __name__ == "__main__":
-    url = input("Enter URL: ") if len(sys.argv) < 2 else sys.argv[1]
-    download_video(url)
+    if len(sys.argv) > 1:
+        url = sys.argv[1]
+    else:
+        url = input("Enter video URL: ")
+
+    success = download_video(url)
+    sys.exit(0 if success else 1)
 """
         self.code_text.setText(code)
 
@@ -2696,7 +2244,7 @@ if __name__ == "__main__":
         clipboard = QApplication.clipboard()
         clipboard.setText(self.code_text.toPlainText())
         self.log_message("Code copied to clipboard")
-        self.statusBar.showMessage("Code copied!", 3000)
+        self.statusBar.showMessage("Code copied to clipboard", 3000)
 
     def save_code(self):
         """Save code to file"""
@@ -2710,157 +2258,9 @@ if __name__ == "__main__":
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(self.code_text.toPlainText())
                 self.log_message(f"Code saved to: {filename}")
-                QMessageBox.information(self, "Success", f"Code saved!")
+                QMessageBox.information(self, "Success", f"Code saved to:\n{filename}")
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to save: {str(e)}")
-
-    # ===== ADDITIONAL FEATURES =====
-
-    def schedule_download(self):
-        """Schedule a download"""
-        url = self.url_input.text().strip()
-        if not url:
-            QMessageBox.warning(self, "Error", "Please enter a URL first!")
-            return
-
-        dialog = ScheduleDownloadDialog(self)
-        if dialog.exec_() == QDialog.Accepted:
-            scheduled_time = dialog.get_scheduled_datetime()
-            self.scheduled_downloads.append({'url': url, 'datetime': scheduled_time})
-            self.log_message(f"Scheduled download: {url} at {scheduled_time.toString()}")
-            QMessageBox.information(self, "Success",
-                                    f"Download scheduled for {scheduled_time.toString('yyyy-MM-dd HH:mm')}")
-
-    def show_format_selector(self):
-        """Show advanced format selector"""
-        if not self.current_video_info:
-            QMessageBox.warning(self, "Error", "Please fetch video info first!")
-            return
-
-        formats = self.current_video_info.get('formats', [])
-        if not formats:
-            QMessageBox.warning(self, "Error", "No formats available!")
-            return
-
-        dialog = FormatSelectorDialog(formats, self)
-        if dialog.exec_() == QDialog.Accepted:
-            selected = dialog.get_selected_format()
-            if selected:
-                self.log_message(f"Selected format: {selected.get('format_id')}")
-
-    def find_duplicates(self):
-        """Find duplicate files in download folder"""
-        folder = self.path_input.text()
-        if not os.path.exists(folder):
-            QMessageBox.warning(self, "Error", "Download folder does not exist!")
-            return
-
-        self.log_message("Scanning for duplicates...")
-        files_hash = {}
-        duplicates = []
-
-        for root, dirs, files in os.walk(folder):
-            for filename in files:
-                filepath = os.path.join(root, filename)
-                try:
-                    with open(filepath, 'rb') as f:
-                        file_hash = hashlib.md5(f.read()).hexdigest()
-
-                    if file_hash in files_hash:
-                        duplicates.append((filepath, files_hash[file_hash]))
-                    else:
-                        files_hash[file_hash] = filepath
-                except:
-                    pass
-
-        if duplicates:
-            msg = f"Found {len(duplicates)} duplicate files:\n\n"
-            for dup, original in duplicates[:10]:
-                msg += f"• {os.path.basename(dup)}\n"
-            if len(duplicates) > 10:
-                msg += f"\n... and {len(duplicates) - 10} more"
-            QMessageBox.information(self, "Duplicates Found", msg)
-        else:
-            QMessageBox.information(self, "No Duplicates", "No duplicate files found!")
-
-        self.log_message(f"Duplicate scan complete: {len(duplicates)} found")
-
-    def check_disk_space(self):
-        """Check available disk space"""
-        try:
-            import shutil
-            path = self.path_input.text()
-            total, used, free = shutil.disk_usage(path)
-
-            QMessageBox.information(self, "Disk Space",
-                                    f"Drive: {path}\n\n"
-                                    f"Total: {self.format_bytes(total)}\n"
-                                    f"Used: {self.format_bytes(used)}\n"
-                                    f"Free: {self.format_bytes(free)}\n\n"
-                                    f"Free %: {(free / total) * 100:.1f}%")
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to check disk space:\n{str(e)}")
-
-    def show_shortcuts(self):
-        """Show keyboard shortcuts"""
-        shortcuts = """
-Keyboard Shortcuts:
-
-Ctrl+N - New Download
-Ctrl+B - Batch Download  
-Ctrl+T - Schedule Download
-Ctrl+O - Open Download Folder
-Ctrl+H - View History
-Ctrl+L - View Log
-Ctrl+S - View Statistics
-Ctrl+, - Settings
-Ctrl+Q - Quit
-
-Tab Navigation:
-Use Tab/Shift+Tab to navigate between fields
-Enter in URL field - Fetch video info
-"""
-        QMessageBox.information(self, "Keyboard Shortcuts", shortcuts)
-
-    def export_queue(self):
-        """Export download queue"""
-        if not self.download_queue:
-            QMessageBox.information(self, "Info", "Queue is empty!")
-            return
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Queue",
-            f"download_queue_{datetime.now().strftime('%Y%m%d')}.txt",
-            "Text Files (*.txt);;JSON Files (*.json);;All Files (*)"
-        )
-
-        if filename:
-            try:
-                if filename.endswith('.json'):
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        json.dump(self.download_queue, f, indent=2)
-                else:
-                    with open(filename, 'w', encoding='utf-8') as f:
-                        f.write("Download Queue\n")
-                        f.write("=" * 80 + "\n\n")
-                        for i, item in enumerate(self.download_queue, 1):
-                            f.write(f"{i}. {item['url']} [{item['status']}]\n")
-
-                self.log_message(f"Queue exported to: {filename}")
-                QMessageBox.information(self, "Success", f"Queue exported!")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export: {str(e)}")
-
-    def show_settings_dialog(self):
-        """Show settings dialog"""
-        dialog = SettingsDialog(self)
-        if dialog.exec_() == QDialog.Accepted:
-            self.log_message("Settings updated")
-
-    def show_about_dialog(self):
-        """Show about dialog"""
-        dialog = AboutDialog(self)
-        dialog.exec_()
+                QMessageBox.critical(self, "Error", f"Failed to save code:\n{str(e)}")
 
     def show_batch_download_dialog(self):
         """Show batch download dialog"""
@@ -2869,11 +2269,21 @@ Enter in URL field - Fetch video info
             urls = dialog.get_urls()
             for url in urls:
                 self.add_url_to_queue(url)
-            self.tabs.setCurrentIndex(5)
+            self.tabs.setCurrentIndex(6)
             self.log_message(f"Added {len(urls)} URLs to queue")
 
+    def show_settings_dialog(self):
+        """Show settings dialog"""
+        dialog = SettingsDialog(self)
+        dialog.exec_()
+
+    def show_about_dialog(self):
+        """Show about dialog"""
+        dialog = AboutDialog(self)
+        dialog.exec_()
+
     def open_download_folder(self):
-        """Open download folder in file explorer"""
+        """Open download folder"""
         path = self.path_input.text()
         if os.path.exists(path):
             if platform.system() == 'Windows':
@@ -2893,7 +2303,6 @@ Enter in URL field - Fetch video info
             if result.returncode == 0:
                 version = result.stdout.strip()
                 self.log_message(f"yt-dlp version: {version}")
-                self.statusBar.showMessage(f"yt-dlp v{version}", 5000)
         except:
             self.log_message("Could not check yt-dlp version")
 
@@ -2914,7 +2323,7 @@ Enter in URL field - Fetch video info
             self.log_message(f"Update error: {str(e)}")
 
     def check_ffmpeg(self):
-        """Check if FFmpeg is installed"""
+        """Check FFmpeg installation"""
         try:
             result = subprocess.run(['ffmpeg', '-version'],
                                     capture_output=True, text=True, timeout=5)
@@ -2931,7 +2340,7 @@ Enter in URL field - Fetch video info
                 "FFmpeg is required for:\n"
                 "• Merging video and audio\n"
                 "• Converting formats\n"
-                "• Embedding thumbnails\n\n"
+                "• Embedding thumbnails and subtitles\n\n"
                 "Download from: https://ffmpeg.org/download.html"
             )
         except Exception as e:
@@ -2952,32 +2361,464 @@ Enter in URL field - Fetch video info
                 self.download_thread.cancel()
                 self.download_thread.wait(3000)
 
-        if self.batch_thread and self.batch_thread.isRunning():
-            self.batch_thread.cancel()
-            self.batch_thread.wait(3000)
-
         self.save_settings()
         self.save_history()
-        self.save_statistics()
         event.accept()
 
 
 def main():
-    """Main application entry point"""
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 
-    # Set application metadata
     app.setApplicationName("Video Downloader Pro")
     app.setOrganizationName("VDP")
-    app.setApplicationVersion("3.0")
+    app.setApplicationVersion("2.0")
 
-    # Create and show main window
     window = VideoDownloaderApp()
     window.show()
-
     sys.exit(app.exec_())
 
 
 if __name__ == '__main__':
     main()
+
+# ============================================================================
+# INSTALLATION & USAGE GUIDE
+# ============================================================================
+
+"""
+INSTALLATION REQUIREMENTS:
+
+1. Install Python 3.8+
+   Download from: https://www.python.org/downloads/
+
+2. Install required packages:
+   pip install PyQt5 yt-dlp
+
+3. Install FFmpeg (optional but recommended):
+   - Windows: https://ffmpeg.org/download.html
+   - macOS: brew install ffmpeg
+   - Linux: sudo apt-get install ffmpeg
+
+4. Run the application:
+   python download-v2.py
+
+
+FEATURES BREAKDOWN:
+
+VIDEO DOWNLOADING:
+- Choose quality (240p to 8K)
+- Select format (MP4, MKV, WebM, AVI, MOV)
+- Download audio only with quality selection
+- Embed thumbnails
+- Save descriptions
+- Rate limiting option
+- Retry configuration
+
+SUBTITLE DOWNLOADING:
+- Download in 25+ languages
+- Auto-generated subtitles support
+- Multiple formats (SRT, VTT, ASS, JSON3)
+- Embed subtitles into video
+- Download subtitles only (no video)
+- Custom language selection
+
+PLAYLIST MANAGEMENT:
+- Load entire playlists
+- Multi-select videos
+- Batch download from playlists
+- Progress tracking
+
+QUEUE SYSTEM:
+- Add multiple URLs to queue
+- Batch process downloads
+- Track individual download status
+- Remove items from queue
+
+HISTORY & LOGGING:
+- Track all downloads
+- Export history as TXT or JSON
+- View detailed logs
+- Save logs to file
+
+CODE GENERATION:
+- Generate Python scripts automatically
+- Copy code to clipboard
+- Save as standalone script
+
+
+KEYBOARD SHORTCUTS:
+
+Ctrl+N  - New Download
+Ctrl+B  - Batch Download
+Ctrl+O  - Open Download Folder
+Ctrl+,  - Settings
+Ctrl+H  - View History
+Ctrl+L  - View Log
+Ctrl+Q  - Exit
+
+
+EXAMPLE USAGE:
+
+1. Basic Video Download:
+   - Paste URL in URL field
+   - Click "Get Info" to preview
+   - Select quality and format
+   - Click "Download"
+
+2. Download with Subtitles:
+   - Paste URL
+   - Check "Download Subtitles"
+   - Click "Subtitle Options" for advanced settings
+   - Select languages and format
+   - Click "Download"
+
+3. Subtitle Only:
+   - Go to "Subtitles" tab
+   - Paste URL
+   - Select languages and format
+   - Click "Download Subtitles Only"
+
+4. Batch Download:
+   - Click "Batch Download" button
+   - Paste multiple URLs (one per line)
+   - Click "Ok"
+   - URLs added to queue
+   - Go to Queue tab
+   - Click "Start Queue"
+
+5. Generate Script:
+   - Configure all options
+   - Go to "Code" tab
+   - Copy code or save as file
+   - Use standalone script
+
+
+SUBTITLE LANGUAGES SUPPORTED:
+
+English, Spanish, French, German, Italian, Portuguese, Russian, Japanese,
+Korean, Chinese, Arabic, Hindi, Polish, Turkish, Dutch, Vietnamese,
+Indonesian, Thai, Ukrainian, Czech, Greek, Hungarian, Romanian, Swedish,
+Finnish, Danish, Norwegian
+
+
+TROUBLESHOOTING:
+
+1. "yt-dlp not found"
+   - Install: pip install --upgrade yt-dlp
+   - Or: Check Tools > Update yt-dlp
+
+2. "FFmpeg not found"
+   - Required for merging/embedding
+   - Download from ffmpeg.org
+   - Add to system PATH
+
+3. Download fails
+   - Check URL is valid and accessible
+   - Try updating yt-dlp (Tools > Update yt-dlp)
+   - Check internet connection
+   - Try different quality setting
+
+4. Subtitles not downloading
+   - Check platform supports subtitles (YouTube, Vimeo, etc)
+   - Try "All Available" languages option
+   - Ensure "Auto-Generated" is checked if needed
+
+5. Cannot embed subtitles
+   - Requires FFmpeg installed
+   - Install FFmpeg and add to PATH
+   - Verify with Tools > Check FFmpeg
+
+
+FILE LOCATIONS:
+
+Settings: ~/.video_downloader_settings.json
+History: ~/.video_downloader_history.json
+Downloads: ~/Downloads (default, customizable)
+
+
+TIPS:
+
+- Use queue for batch processing
+- Generate scripts for repeated operations
+- Export history for record keeping
+- Check FFmpeg status if embedding fails
+- Update yt-dlp regularly for site support
+- Use quality limits for bandwidth control
+- Embed thumbnails for better video info
+- Save descriptions for reference
+
+
+API REFERENCE (FOR DEVELOPERS):
+
+SubtitleManager():
+  - get_all_languages(): Returns dict of supported languages
+  - validate_languages(lang_list): Validates language codes
+  - build_subtitle_options(): Creates yt-dlp options
+
+LanguageListWidget(parent):
+  - get_selected_languages(): Returns selected language codes
+  - select_languages(codes): Programmatically select languages
+
+SubtitleDownloadDialog(parent):
+  - get_options(): Returns user-selected options
+
+VideoDownloaderApp():
+  - show_subtitle_dialog(): Show subtitle configuration
+  - download_subtitles_only(): Download subtitles without video
+  - apply_subtitle_options(): Apply options to download
+
+
+COMMAND LINE USAGE (Generated Scripts):
+
+python download_video.py "https://www.youtube.com/watch?v=..."
+
+Or without URL argument:
+python download_video.py
+(Then enter URL when prompted)
+
+
+LICENSE & CREDITS:
+
+Built with:
+- PyQt5: https://pypi.org/project/PyQt5/
+- yt-dlp: https://github.com/yt-dlp/yt-dlp
+- FFmpeg: https://ffmpeg.org/
+
+This is a free, open-source tool for downloading videos
+in compliance with applicable laws and platform terms of service.
+
+
+VERSION HISTORY:
+
+v2.0 - Advanced Edition (Current)
+  ✅ Complete subtitle support
+  ✅ Multi-language subtitle downloads
+  ✅ Subtitle embedding
+  ✅ Enhanced UI with 7 tabs
+  ✅ Batch queue system
+  ✅ Code generation
+  ✅ History tracking
+  ✅ System tray integration
+
+v1.0 - Initial Release
+  • Basic video downloading
+  • Quality/format selection
+  • Playlist support
+
+
+FUTURE ENHANCEMENTS:
+
+- Video preview/thumbnail
+- Playlist auto-download scheduling
+- Download speed limiting per item
+- Subtitle translation
+- Automatic proxy rotation
+- Download notifications
+- Advanced filtering options
+- Cloud storage integration
+- Metadata editing
+- Video quality comparison
+
+
+SUPPORT:
+
+For issues or suggestions:
+1. Check the troubleshooting section above
+2. Verify yt-dlp is up to date
+3. Ensure FFmpeg is installed
+4. Check internet connection
+5. Try a different URL to test
+
+Common platform support:
+- YouTube ✅
+- Vimeo ✅
+- DailyMotion ✅
+- Twitch ✅
+- Instagram ✅
+- TikTok ✅
+- Facebook ✅
+- And 500+ more...
+
+Visit: https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md
+"""
+{message}
+")
+QMessageBox.information(self, "Success", f"{message}\n\nSaved to: {self.sub_path_input.text()}")
+else:
+self.sub_progress_bar.setValue(0)
+self.sub_status_label.setText("❌ Download failed")
+self.sub_status_label.setStyleSheet("color: #f85149; font-weight: bold;")
+self.log_message(f"❌ {message}")
+QMessageBox.critical(self, "Error", message)
+
+
+def get_download_options(self):
+    """Get download options"""
+    quality = self.get_quality_value()
+    format_type = self.format_combo.currentText()
+    audio_only = self.audio_only_check.isChecked()
+    audio_quality = self.audio_quality_combo.currentText().split()[0]
+
+    if audio_only:
+        format_str = "bestaudio/best"
+    else:
+        if quality == "best":
+            format_str = "bestvideo+bestaudio/best"
+        else:
+            format_str = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]"
+
+    postprocessors = []
+    if audio_only:
+        postprocessors.append({
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': self.audio_format_combo.currentText(),
+            'preferredquality': audio_quality,
+        })
+    else:
+        postprocessors.append({
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': format_type,
+        })
+
+    if self.embed_thumbnail_check.isChecked():
+        postprocessors.append({'key': 'EmbedThumbnail'})
+
+    ydl_opts = {
+        'format': format_str,
+        'outtmpl': os.path.join(self.path_input.text(), '%(title)s.%(ext)s'),
+        'merge_output_format': format_type,
+        'ignoreerrors': self.ignore_errors_check.isChecked(),
+        'no_warnings': False,
+        'quiet': False,
+        'retries': self.retries_spin.value(),
+        'fragment_retries': self.retries_spin.value(),
+        'concurrent_fragment_downloads': self.concurrent_spin.value(),
+        'windowsfilenames': True,
+        'postprocessors': postprocessors,
+    }
+
+    if self.write_description_check.isChecked():
+        ydl_opts['writedescription'] = True
+
+    if self.write_thumbnail_check.isChecked():
+        ydl_opts['writethumbnail'] = True
+
+    if self.no_playlist_check.isChecked():
+        ydl_opts['noplaylist'] = True
+
+    if self.limit_rate_check.isChecked() and self.rate_limit_input.text():
+        ydl_opts['ratelimit'] = self.rate_limit_input.text()
+
+    ydl_opts = self.apply_subtitle_options(ydl_opts)
+
+    return ydl_opts
+
+
+def start_download(self):
+    """Start download"""
+    url = self.url_input.text().strip()
+
+    if not url:
+        QMessageBox.warning(self, "Error", "Please enter a valid URL!")
+        return
+
+    if self.download_thread and self.download_thread.isRunning():
+        QMessageBox.warning(self, "Error", "A download is already in progress!")
+        return
+
+    output_path = self.path_input.text()
+    if not os.path.exists(output_path):
+        try:
+            os.makedirs(output_path)
+        except:
+            QMessageBox.warning(self, "Error", "Invalid output path!")
+            return
+
+    ydl_opts = self.get_download_options()
+
+    self.download_thread = DownloadThread(url, ydl_opts)
+    self.download_thread.progress.connect(self.update_progress)
+    self.download_thread.finished.connect(self.download_finished)
+    self.download_thread.log_message.connect(self.log_message)
+    self.download_thread.start()
+
+    self.download_btn.setEnabled(False)
+    self.download_btn.setText("⏳ Downloading...")
+    self.cancel_btn.setEnabled(True)
+    self.progress_bar.setValue(0)
+    self.status_label.setText("Initializing download...")
+    self.status_label.setStyleSheet("color: #58a6ff; font-weight: bold;")
+    self.speed_label.setText("Speed: Calculating...")
+
+    self.save_settings()
+
+
+def cancel_download(self):
+    """Cancel download"""
+    if self.download_thread and self.download_thread.isRunning():
+        reply = QMessageBox.question(
+            self, "Cancel Download",
+            "Are you sure you want to cancel the download?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.download_thread.cancel()
+            self.log_message("Download cancelled by user")
+
+
+def update_progress(self, data):
+    """Update progress"""
+    if data['status'] == 'downloading':
+        percent = int(data['percent'])
+        self.progress_bar.setValue(percent)
+
+        speed = data.get('speed', 0)
+        eta = data.get('eta', 0)
+        downloaded = data.get('downloaded', 0)
+        total = data.get('total', 0)
+
+        speed_str = self.format_bytes(speed) + "/s" if speed else "N/A"
+        eta_str = f"{eta}s" if eta else "N/A"
+        downloaded_str = self.format_bytes(downloaded)
+        total_str = self.format_bytes(total) if total else "N/A"
+
+        self.status_label.setText(f"Downloading: {percent}% ({downloaded_str} / {total_str})")
+        self.speed_label.setText(f"Speed: {speed_str} | ETA: {eta_str}")
+
+    elif data['status'] == 'processing':
+        self.progress_bar.setValue(100)
+        self.status_label.setText("Processing and merging files...")
+        self.speed_label.setText("Almost done...")
+
+
+def download_finished(self, success, message, filepath):
+    """Handle download completion"""
+    self.download_btn.setEnabled(True)
+    self.download_btn.setText("⬇ Download")
+    self.cancel_btn.setEnabled(False)
+
+    if success:
+        self.progress_bar.setValue(100)
+        self.status_label.setText("✅ " + message)
+        self.status_label.setStyleSheet("color: #7ee787; font-weight: bold;")
+        self.speed_label.setText("Completed!")
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        quality = self.quality_combo.currentText()
+        format_type = self.format_combo.currentText().upper()
+        video_title = self.current_video_info.get('title', 'Unknown') if self.current_video_info else 'Unknown'
+
+        history_entry = f"[{timestamp}] {video_title} | {quality} | {format_type}"
+        self.history_list.insertItem(0, history_entry)
+        self.download_history.insert(0, history_entry)
+
+        if len(self.download_history) > 100:
+            self.download_history = self.download_history[:100]
+            self.history_list.takeItem(100)
+
+        self.save_history()
+        self.update_history_count()
+        self.update_stats()
+
+        self.log_message(f"✅
