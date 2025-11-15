@@ -1031,7 +1031,7 @@ class VideoDownloaderApp(QMainWindow):
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
 
-        settings_action = QAction(⚙️ Settings", self)
+        settings_action = QAction("⚙️ Settings", self)
         settings_action.setShortcut("Ctrl+,")
         settings_action.triggered.connect(self.show_settings_dialog)
         edit_menu.addAction(settings_action)
